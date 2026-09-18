@@ -10,12 +10,23 @@ import android.net.Uri
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Rational
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.OrientationEventListener
+import android.view.View
+import android.view.WindowManager
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.platform.LocalConfiguration
+import java.text.SimpleDateFormat
+import java.util.Date
+import kotlin.math.abs
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -90,7 +101,9 @@ private val PLAYLISTS = listOf(
     "Phim quốc tế" to "https://iptv-org.github.io/iptv/categories/movies.m3u",
     "Giải trí" to "https://iptv-org.github.io/iptv/categories/entertainment.m3u",
     "Tin tức" to "https://iptv-org.github.io/iptv/categories/news.m3u",
-    "Thiếu nhi" to "https://iptv-org.github.io/iptv/categories/kids.m3u"
+    "Thiếu nhi" to "https://iptv-org.github.io/iptv/categories/kids.m3u",
+    // Kênh tiếng Việt phát từ nước ngoài: cũng là nguồn dự phòng cho kênh trùng tên (VTV4, VTV5...)
+    "Tiếng Việt" to "https://iptv-org.github.io/iptv/languages/vie.m3u"
 )
 private const val PREFS = "tv_dr_vu"
 private val DeepNavy = Color(0xFF050A12)
@@ -99,7 +112,6 @@ private val Teal = Color(0xFF2DD4BF)
 private val Cyan = Color(0xFF22D3EE)
 private val Muted = Color(0xFF94A3B8)
 
-data class Channel(val id: String, val name: String, val logo: String, val group: String, val url: String, val category: String)
 enum class ChannelTab { ALL, FAVORITES, RECENT }
 
 class MainActivity : ComponentActivity() {
@@ -205,6 +217,18 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     var pipAuto by remember { mutableStateOf(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("pip_auto", false)) }
     var sleepMinutes by remember { mutableStateOf<Int?>(null) }
     var sleepKey by remember { mutableIntStateOf(0) }
+    var fullscreen by remember { mutableStateOf(false) }
+    var holdPortrait by remember { mutableStateOf(false) }
+    var screenLocked by remember { mutableStateOf(false) }
+    var srcIndex by remember { mutableIntStateOf(0) }
+    var srcCount by remember { mutableIntStateOf(0) }
+    var schedule by remember { mutableStateOf<List<Program>>(emptyList()) }
+    var scheduleState by remember { mutableStateOf("") }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var showSchedule by remember { mutableStateOf(false) }
+    var showSources by remember { mutableStateOf(false) }
+    var customUrls by remember { mutableStateOf(loadCustomPlaylists(context)) }
+    val configuration = LocalConfiguration.current
     val recording by RecorderState.isRecording.collectAsState()
     val recorderMessage by RecorderState.lastMessage.collectAsState()
     val playerRef by rememberUpdatedState(player)
@@ -271,8 +295,9 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     LaunchedEffect(player, selected) {
         val p = player ?: return@LaunchedEffect
         val channel = selected ?: return@LaunchedEffect
-        if (p.currentMediaItem?.mediaId != channel.url) {
-            p.setMediaItem(channel.toMediaItem()); p.prepare(); p.play()
+        val ids = channel.sources.map { it.url }
+        if (p.currentMediaItem?.mediaId !in ids) {
+            p.setMediaItem(channel.toMediaItem(0)); p.prepare(); p.play()
         }
     }
 
@@ -298,9 +323,109 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     // Bấm thông báo nhắc lịch -> mở đúng kênh đã hẹn
     LaunchedEffect(openUrl, channels) {
         val url = openUrl ?: return@LaunchedEffect
-        val target = channels.firstOrNull { it.url == url } ?: return@LaunchedEffect
+        val target = channels.firstOrNull { it.hasUrl(url) } ?: return@LaunchedEffect
         choose(target)
         onOpenHandled()
+    }
+
+    val phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+        configuration.screenHeightDp < 600
+    val immersive = selected != null && (fullscreen || phoneLandscape) && !pipMode
+
+    fun exitImmersive() { fullscreen = false; screenLocked = false; holdPortrait = true }
+    fun toggleFullscreen() {
+        if (immersive) exitImmersive() else { holdPortrait = false; fullscreen = true }
+    }
+    fun nextSource() {
+        val p = playerRef ?: return
+        val channel = selected ?: return
+        if (channel.sources.size <= 1) return
+        val current = p.mediaMetadata.extras?.getInt(EXTRA_INDEX, 0) ?: 0
+        p.setMediaItem(channel.toMediaItem((current + 1) % channel.sources.size))
+        p.prepare(); p.play()
+    }
+
+    LaunchedEffect(selected == null) { if (selected == null && fullscreen) exitImmersive() }
+
+    // Một cơ chế xoay duy nhất: bấm nút toàn màn hình -> khóa ngang; thoát -> ép dọc cho tới khi
+    // điện thoại thật sự được cầm dọc, rồi trả lại chế độ tự xoay (trước đây bị kẹt ở chế độ dọc).
+    LaunchedEffect(fullscreen, holdPortrait) {
+        activity?.requestedOrientation = when {
+            fullscreen -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            holdPortrait -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+    DisposableEffect(holdPortrait) {
+        if (!holdPortrait) return@DisposableEffect onDispose { }
+        val listener = object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == OrientationEventListener.ORIENTATION_UNKNOWN) return
+                if (orientation <= 30 || orientation >= 330 || orientation in 150..210) holdPortrait = false
+            }
+        }
+        if (listener.canDetectOrientation()) listener.enable() else holdPortrait = false
+        onDispose { listener.disable() }
+    }
+
+    // Toàn màn hình thật trên cửa sổ chính: ẩn thanh hệ thống, giữ màn hình sáng khi xem
+    DisposableEffect(immersive) {
+        val window = activity?.window
+        if (window != null && immersive) {
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            if (window != null && immersive) {
+                WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    // Nguồn đang phát / tổng số nguồn của kênh
+    DisposableEffect(player) {
+        val p = player ?: return@DisposableEffect onDispose { }
+        fun sync() {
+            val extras = p.mediaMetadata.extras
+            srcIndex = extras?.getInt(EXTRA_INDEX, 0) ?: 0
+            srcCount = extras?.getStringArray(EXTRA_SOURCES)?.size ?: 0
+        }
+        val listener = object : Player.Listener {
+            override fun onEvents(player: Player, events: Player.Events) { sync() }
+        }
+        p.addListener(listener)
+        sync()
+        onDispose { p.removeListener(listener) }
+    }
+
+    // Lịch phát sóng: tải khi đổi kênh; đồng hồ 30 giây/lần để cập nhật "đang phát"
+    LaunchedEffect(selected?.name) {
+        val channel = selected
+        schedule = emptyList()
+        if (channel == null) { scheduleState = ""; return@LaunchedEffect }
+        scheduleState = "loading"
+        runCatching { Epg.schedule(context, channel) }
+            .onSuccess { schedule = it; scheduleState = if (it.isEmpty()) "none" else "ready" }
+            .onFailure { scheduleState = "error" }
+    }
+    LaunchedEffect(Unit) { while (true) { delay(30_000L); nowMs = System.currentTimeMillis() } }
+    val nowProgram = schedule.firstOrNull { nowMs >= it.start && nowMs < it.stop }
+    val nowPlaying = nowProgram?.let { "Đang phát: ${it.title} · ${formatTime(it.start)}–${formatTime(it.stop)}" }
+    val sourceText = if (srcCount > 1) "ĐỔI NGUỒN ${srcIndex + 1}/$srcCount" else null
+
+    if (immersive) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            VideoPlayer(
+                player, controls = true, fullscreen = true, locked = screenLocked,
+                onFullscreenClick = ::exitImmersive, onToggleLock = { screenLocked = !screenLocked },
+                onNextSource = if (srcCount > 1) ::nextSource else null
+            )
+        }
+        return
     }
 
     if (pipMode) {
@@ -332,19 +457,22 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
                     dataSaver = !dataSaver
                     context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).edit().putBoolean("data_saver", dataSaver).apply()
                 },
-                onRecordings = { openRecordings(context) }
+                onRecordings = { openRecordings(context) },
+                onSources = { showSources = true }
             )
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                     PlayerPane(selected, recording, player, selected?.id in favorites, { id ->
                         favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                    }, { toggleRecording(context, selected, recording) },
+                    }, { toggleRecording(context, selected?.let { ch -> ch.copy(url = player?.currentMediaItem?.mediaId ?: ch.url) }, recording) },
                         { enterPip(context) }, { minutes -> selected?.let { channel ->
                             if (minutes > 0) {
                                 scheduleReminder(context, channel, minutes)
                                 showMessage("Đã hẹn nhắc sau $minutes phút.")
                             } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
-                        } }, Modifier.weight(1.65f))
+                        } }, Modifier.weight(1.65f),
+                        nowPlaying = nowPlaying, sourceText = sourceText, onNextSource = ::nextSource,
+                        onSchedule = { showSchedule = true }, onFullscreen = ::toggleFullscreen)
                     ChannelPane(visible, selected, query, category, tab, loading,
                         onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
                         modifier = Modifier.weight(.85f))
@@ -355,7 +483,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp).aspectRatio(16 / 9f),
                         shape = RoundedCornerShape(18.dp), color = Color.Black, shadowElevation = 16.dp
                     ) {
-                        selected?.let { VideoPlayer(player) } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        selected?.let { VideoPlayer(player, onFullscreenClick = ::toggleFullscreen) } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text("Chọn một kênh để bắt đầu", color = Muted)
                         }
                     }
@@ -363,13 +491,15 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
                         item {
                         PlayerPane(selected, recording, player, selected?.id in favorites, { id ->
                             favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                        }, { toggleRecording(context, selected, recording) },
+                        }, { toggleRecording(context, selected?.let { ch -> ch.copy(url = player?.currentMediaItem?.mediaId ?: ch.url) }, recording) },
                             { enterPip(context) }, { minutes -> selected?.let { channel ->
                                 if (minutes > 0) {
                                     scheduleReminder(context, channel, minutes)
                                     showMessage("Đã hẹn nhắc sau $minutes phút.")
                                 } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
-                            } }, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), showVideo = false)
+                            } }, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), showVideo = false,
+                            nowPlaying = nowPlaying, sourceText = sourceText, onNextSource = ::nextSource,
+                            onSchedule = { showSchedule = true }, onFullscreen = ::toggleFullscreen)
                         }
                         item {
                         ChannelPane(visible, selected, query, category, tab, loading,
@@ -393,13 +523,32 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
             }
         }
     }
+    if (showSchedule && selected != null) {
+        ScheduleDialog(selected!!, schedule, scheduleState, nowMs) { showSchedule = false }
+    }
+    if (showSources) {
+        SourcesDialog(
+            urls = customUrls,
+            onAdd = { url ->
+                if (url !in customUrls) {
+                    customUrls = customUrls + url; saveCustomPlaylists(context, customUrls)
+                    loading = true; scope.launch { reload() }
+                }
+            },
+            onRemove = { url ->
+                customUrls = customUrls - url; saveCustomPlaylists(context, customUrls)
+                loading = true; scope.launch { reload() }
+            },
+            onDismiss = { showSources = false }
+        )
+    }
     }
 }
 
 @Composable
 private fun AppHeader(
     sleepMinutes: Int?, dataSaver: Boolean, pipAuto: Boolean, onPipAuto: () -> Unit, onSleep: (Int?) -> Unit,
-    onDataSaver: () -> Unit, onRecordings: () -> Unit
+    onDataSaver: () -> Unit, onRecordings: () -> Unit, onSources: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
     Row(
@@ -430,6 +579,11 @@ private fun AppHeader(
                     leadingIcon = { Icon(Icons.Default.PictureInPictureAlt, null) },
                     onClick = { onPipAuto(); menu = false }
                 )
+                DropdownMenuItem(
+                    text = { Text("Nguồn phát dự phòng của bạn…") },
+                    leadingIcon = { Icon(Icons.Default.SwapHoriz, null) },
+                    onClick = { onSources(); menu = false }
+                )
                 listOf(15, 30, 60, 90).forEach { minutes ->
                     DropdownMenuItem(
                         text = { Text("Hẹn tắt sau $minutes phút") },
@@ -451,7 +605,8 @@ private fun AppHeader(
 private fun PlayerPane(
     selected: Channel?, recording: Boolean, player: Player?, favorite: Boolean, onFavorite: (String) -> Unit,
     onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier,
-    showVideo: Boolean = true
+    showVideo: Boolean = true, nowPlaying: String? = null, sourceText: String? = null,
+    onNextSource: () -> Unit = {}, onSchedule: () -> Unit = {}, onFullscreen: () -> Unit = {}
 ) {
     var reminderMenu by remember { mutableStateOf(false) }
     Column(modifier) {
@@ -467,7 +622,7 @@ private fun PlayerPane(
                         Spacer(Modifier.height(10.dp)); Text("Chọn một kênh để bắt đầu", color = Muted)
                     }
                 }
-            } else VideoPlayer(player)
+            } else VideoPlayer(player, onFullscreenClick = onFullscreen)
         }
         Spacer(Modifier.height(16.dp))
         Row(verticalAlignment = Alignment.Top) {
@@ -480,6 +635,8 @@ private fun PlayerPane(
                 Text(selected?.name ?: "TV Dr Vũ", fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(selected?.group ?: "Danh sách kênh Việt Nam", color = Muted, fontSize = 14.sp)
+                if (nowPlaying != null) Text(nowPlaying, color = Teal, fontSize = 13.sp, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
             FilledIconButton(onClick = { selected?.id?.let(onFavorite) },
                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (favorite) Color(0x332DD4BF) else Color(0xFF142033))) {
@@ -507,7 +664,15 @@ private fun PlayerPane(
                 }
             }
         }
-        Spacer(Modifier.height(9.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onSchedule, enabled = selected != null, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.Schedule, null); Spacer(Modifier.width(6.dp)); Text("LỊCH PHÁT SÓNG", fontSize = 11.sp)
+            }
+            if (sourceText != null) OutlinedButton(onClick = onNextSource, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.SwapHoriz, null); Spacer(Modifier.width(6.dp)); Text(sourceText, fontSize = 11.sp)
+            }
+        }
         Spacer(Modifier.height(14.dp))
         Button(onClick = onRecord, enabled = selected != null, modifier = Modifier.fillMaxWidth().height(54.dp),
             shape = RoundedCornerShape(16.dp),
@@ -525,68 +690,122 @@ private fun PlayerPane(
     }
 }
 
+/**
+ * Vuốt dọc trên PlayerView khi toàn màn hình: nửa trái chỉnh độ sáng, nửa phải chỉnh âm lượng.
+ * Dùng OnTouchListener của View nên chạm nhẹ ở bất kỳ đâu vẫn hiện/ẩn thanh điều khiển như thường.
+ */
+private class SwipeTouchListener(
+    context: Context,
+    private val activity: ComponentActivity?,
+    private val onHud: (kind: Int, percent: Int) -> Unit
+) : View.OnTouchListener {
+    var enabled = false
+    private val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val resolver = context.contentResolver
+    private val maxVolume = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+    private var width = 1
+    private var height = 1
+    private var scrolling = false
+    private var leftSide = true
+    private var brightness = 0.5f
+    private var volume = 0f
+
+    private val detector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean { scrolling = false; return true }
+
+        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+            if (!enabled || e1 == null) return false
+            if (!scrolling) {
+                if (abs(e2.y - e1.y) < abs(e2.x - e1.x)) return false   // vuốt ngang: bỏ qua
+                scrolling = true
+                leftSide = e1.x < width / 2f
+                if (leftSide) brightness = currentBrightness()
+                else volume = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+            }
+            val delta = distanceY / height * 1.3f   // vuốt lên = tăng
+            if (leftSide) {
+                brightness = (brightness + delta).coerceIn(0.02f, 1f)
+                activity?.window?.let { w ->
+                    val attrs = w.attributes
+                    attrs.screenBrightness = brightness
+                    w.attributes = attrs
+                }
+                onHud(0, (brightness * 100).roundToInt())
+            } else {
+                volume = (volume + delta * maxVolume).coerceIn(0f, maxVolume.toFloat())
+                audio.setStreamVolume(AudioManager.STREAM_MUSIC, volume.roundToInt(), 0)
+                onHud(1, (volume / maxVolume * 100).roundToInt())
+            }
+            return true
+        }
+    })
+
+    override fun onTouch(v: View, event: MotionEvent): Boolean {
+        width = v.width.coerceAtLeast(1)
+        height = v.height.coerceAtLeast(1)
+        if (!enabled) return false
+        detector.onTouchEvent(event)
+        val consumed = scrolling
+        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) scrolling = false
+        return consumed
+    }
+
+    private fun currentBrightness(): Float {
+        val w = activity?.window?.attributes?.screenBrightness ?: -1f
+        if (w >= 0f) return w.coerceIn(0.02f, 1f)
+        return runCatching { Settings.System.getInt(resolver, Settings.System.SCREEN_BRIGHTNESS) / 255f }
+            .getOrDefault(0.5f).coerceIn(0.02f, 1f)
+    }
+
+    /** Thoát toàn màn hình: trả độ sáng về theo hệ thống. */
+    fun resetBrightness() {
+        activity?.window?.let { w ->
+            val attrs = w.attributes
+            attrs.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            w.attributes = attrs
+        }
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 private fun VideoPlayer(
-    player: Player?, controls: Boolean = true
+    player: Player?, controls: Boolean = true, fullscreen: Boolean = false, locked: Boolean = false,
+    onFullscreenClick: () -> Unit = {}, onToggleLock: () -> Unit = {}, onNextSource: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     val target = player
-    val audioManager = remember(context) {
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    }
-
-    var isFullscreen by remember { mutableStateOf(false) }
-    var screenLocked by remember { mutableStateOf(false) }
-    var hudKind by remember { mutableStateOf<String?>(null) }
+    val fullscreenClick by rememberUpdatedState(onFullscreenClick)
+    var hudKind by remember { mutableIntStateOf(-1) }
     var hudPercent by remember { mutableIntStateOf(0) }
-    var hudActive by remember { mutableStateOf(false) }
-
-    fun readBrightness(): Float {
-        val windowValue = activity?.window?.attributes?.screenBrightness ?: -1f
-        if (windowValue >= 0f) return windowValue.coerceIn(0.02f, 1f)
-        return runCatching {
-            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
-        }.getOrDefault(0.5f).coerceIn(0.02f, 1f)
-    }
-
-    var brightnessLevel by remember(activity) { mutableFloatStateOf(readBrightness()) }
-    var volumeLevel by remember(audioManager) {
-        mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
-    }
-
     var playbackError by remember(target) {
-        mutableStateOf<String?>(
-            if (target?.playerError != null)
-                "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
-            else null
-        )
+        mutableStateOf<String?>(if (target?.playerError != null) ERROR_TEXT else null)
     }
-    var buffering by remember(target) {
-        mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING)
-    }
+    var buffering by remember(target) { mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING) }
+    val swipe = remember { SwipeTouchListener(context, activity) { kind, percent -> hudKind = kind; hudPercent = percent } }
 
-    LaunchedEffect(hudActive) {
-        if (!hudActive && hudKind != null) {
-            delay(650)
-            if (!hudActive) hudKind = null
-        }
+    LaunchedEffect(hudKind, hudPercent) {
+        if (hudKind >= 0) { delay(700); hudKind = -1 }
+    }
+    DisposableEffect(fullscreen) {
+        onDispose { if (fullscreen) swipe.resetBrightness() }
     }
 
     DisposableEffect(target) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
+                // Lỗi "behind live window" do dịch vụ phát tự phục hồi, không báo lỗi cho người xem
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) return
+                // Còn nguồn dự phòng: dịch vụ phát đang tự chuyển nguồn, chưa báo lỗi
+                if (target?.hasBackupSource() == true) return
                 buffering = false
-                playbackError = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
+                playbackError = ERROR_TEXT
             }
-
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) playbackError = null
             }
-
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 playbackError = null
                 buffering = true
@@ -596,278 +815,237 @@ private fun VideoPlayer(
         onDispose { target?.removeListener(listener) }
     }
 
-    fun setFullscreen(enabled: Boolean) {
-        if (enabled == isFullscreen) return
-        isFullscreen = enabled
-        if (!enabled) screenLocked = false
+    BackHandler(enabled = fullscreen) { if (locked) onToggleLock() else onFullscreenClick() }
 
-        activity?.window?.let { window ->
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            WindowInsetsControllerCompat(window, window.decorView).apply {
-                if (enabled) {
-                    hide(WindowInsetsCompat.Type.systemBars())
-                    systemBarsBehavior =
-                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                } else {
-                    show(WindowInsetsCompat.Type.systemBars())
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            factory = {
+                (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
+                    this.player = target
+                    useController = controls && !locked
+                    if (controls) setFullscreenButtonClickListener { _ -> fullscreenClick() }
+                    setOnTouchListener(swipe)
                 }
-            }
-        }
-
-        activity?.requestedOrientation = if (enabled) {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        }
-
-        if (!enabled) {
-            activity?.window?.decorView?.postDelayed({
-                if (!isFullscreen) {
-                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                }
-            }, 650L)
-        }
-    }
-
-    BackHandler(enabled = isFullscreen) {
-        if (screenLocked) screenLocked = false else setFullscreen(false)
-    }
-
-    @Composable
-    fun GestureZone(brightness: Boolean, modifier: Modifier) {
-        val maxVolume = remember(audioManager) {
-            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        }
-
-        Box(
-            modifier.pointerInput(isFullscreen, screenLocked) {
-                if (!isFullscreen || screenLocked) return@pointerInput
-                detectVerticalDragGestures(
-                    onDragStart = {
-                        hudActive = true
-                        if (brightness) {
-                            brightnessLevel = readBrightness()
-                            hudKind = "Độ sáng"
-                            hudPercent = (brightnessLevel * 100).roundToInt()
-                        } else {
-                            volumeLevel =
-                                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-                            hudKind = "Âm lượng"
-                            hudPercent =
-                                ((volumeLevel / maxVolume.toFloat()) * 100).roundToInt()
-                        }
-                    },
-                    onVerticalDrag = { change, dragAmount ->
-                        change.consume()
-                        val height = size.height.coerceAtLeast(1).toFloat()
-                        val delta = (-dragAmount / height) * 1.35f
-
-                        if (brightness) {
-                            brightnessLevel = (brightnessLevel + delta).coerceIn(0.02f, 1f)
-                            activity?.window?.let { window ->
-                                val attrs = window.attributes
-                                attrs.screenBrightness = brightnessLevel
-                                window.attributes = attrs
-                            }
-                            hudKind = "Độ sáng"
-                            hudPercent = (brightnessLevel * 100).roundToInt()
-                        } else {
-                            volumeLevel =
-                                (volumeLevel + delta * maxVolume).coerceIn(0f, maxVolume.toFloat())
-                            val newVolume = volumeLevel.roundToInt().coerceIn(0, maxVolume)
-                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-                            hudKind = "Âm lượng"
-                            hudPercent =
-                                ((volumeLevel / maxVolume.toFloat()) * 100).roundToInt()
-                        }
-                    },
-                    onDragEnd = { hudActive = false },
-                    onDragCancel = { hudActive = false }
-                )
-            }
-        )
-    }
-
-    @Composable
-    fun PlayerSurface(modifier: Modifier) {
-        Box(modifier.background(Color.Black)) {
-            AndroidView(
-                factory = {
-                    (LayoutInflater.from(it)
-                        .inflate(R.layout.player_view, null) as PlayerView).apply {
-                        this.player = target
-                        useController = controls && !screenLocked
-                        if (controls) {
-                            setFullscreenButtonClickListener { enabled ->
-                                setFullscreen(enabled)
-                            }
-                        }
-                    }
-                },
-                update = {
-                    it.player = target
-                    it.useController = controls && !screenLocked
-                },
-                onRelease = { it.player = null },
-                modifier = Modifier.fillMaxSize()
-            )
-
-            if (isFullscreen && !screenLocked) {
-                GestureZone(
-                    brightness = true,
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxHeight()
-                        .fillMaxWidth(0.34f)
-                )
-                GestureZone(
-                    brightness = false,
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .fillMaxWidth(0.34f)
-                )
-            }
-
-            if (buffering) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center).size(42.dp),
-                    color = Teal,
-                    strokeWidth = 4.dp
-                )
-            }
-
-            playbackError?.let {
-                Surface(
-                    color = Color(0xCC7F1D1D),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.align(Alignment.Center).padding(18.dp)
-                ) {
-                    Column(
-                        Modifier.padding(14.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(it, fontSize = 13.sp)
-                        TextButton(onClick = {
-                            playbackError = null
-                            buffering = true
-                            target?.let { p ->
-                                p.prepare()
-                                p.play()
-                            }
-                        }) {
-                            Text("THỬ LẠI", color = Color.White)
-                        }
-                    }
-                }
-            }
-
-            if (isFullscreen && hudKind != null) {
-                Surface(
-                    color = Color(0xCC0F172A),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.align(Alignment.Center)
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 22.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            if (hudKind == "Độ sáng") Icons.Default.Brightness6
-                            else Icons.Default.VolumeUp,
-                            null,
-                            tint = Color.White
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            "$hudKind  $hudPercent%",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            if (isFullscreen) {
-                if (screenLocked) {
-                    Box(
-                        Modifier.fillMaxSize().clickable(
-                            interactionSource = remember {
-                                androidx.compose.foundation.interaction.MutableInteractionSource()
-                            },
-                            indication = null
-                        ) {}
-                    )
-                }
-
-                if (!screenLocked) {
-                    FilledIconButton(
-                        onClick = { setFullscreen(false) },
-                        modifier = Modifier.align(Alignment.TopStart).padding(18.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = Color(0xAA0F172A)
-                        )
-                    ) {
-                        Icon(Icons.Default.FullscreenExit, "Thu nhỏ", tint = Color.White)
-                    }
-                }
-
-                FilledIconButton(
-                    onClick = { screenLocked = !screenLocked },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = Color(0xAA0F172A)
-                    )
-                ) {
-                    Icon(
-                        if (screenLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                        if (screenLocked) "Mở khóa màn hình" else "Khóa màn hình",
-                        tint = Color.White
-                    )
-                }
-            }
-        }
-    }
-
-    if (isFullscreen) {
-        Dialog(
-            onDismissRequest = {
-                if (!screenLocked) setFullscreen(false)
             },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false
-            )
-        ) {
-            PlayerSurface(Modifier.fillMaxSize())
+            update = {
+                it.player = target
+                it.useController = controls && !locked
+                swipe.enabled = fullscreen && !locked
+            },
+            // Nhiều PlayerView có thể cùng gắn một trình phát: view bị gỡ phải nhả trình phát ra
+            onRelease = { it.player = null; it.setOnTouchListener(null) },
+            modifier = Modifier.fillMaxSize()
+        )
+        if (buffering) CircularProgressIndicator(
+            modifier = Modifier.align(Alignment.Center).size(42.dp), color = Teal, strokeWidth = 4.dp
+        )
+        playbackError?.let {
+            Surface(
+                color = Color(0xCC7F1D1D), shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.align(Alignment.Center).padding(18.dp)
+            ) {
+                Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(it, fontSize = 13.sp)
+                    Row {
+                        TextButton(onClick = {
+                            playbackError = null; buffering = true
+                            target?.let { p -> p.prepare(); p.play() }
+                        }) { Text("THỬ LẠI", color = Color.White) }
+                        if (onNextSource != null) TextButton(onClick = {
+                            playbackError = null; buffering = true; onNextSource()
+                        }) { Text("NGUỒN KHÁC", color = Color.White) }
+                    }
+                }
+            }
         }
-    } else {
-        PlayerSurface(Modifier.fillMaxSize())
+        if (fullscreen) {
+            if (hudKind >= 0) Surface(
+                color = Color(0xCC0F172A), shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Row(Modifier.padding(horizontal = 22.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (hudKind == 0) Icons.Default.Brightness6 else Icons.Default.VolumeUp, null, tint = Color.White)
+                    Spacer(Modifier.width(10.dp))
+                    Text("${if (hudKind == 0) "Độ sáng" else "Âm lượng"}  $hudPercent%", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (locked) Box(
+                Modifier.fillMaxSize().clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
+            ) else FilledIconButton(
+                onClick = onFullscreenClick,
+                modifier = Modifier.align(Alignment.TopStart).padding(18.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xAA0F172A))
+            ) { Icon(Icons.Default.FullscreenExit, "Thu nhỏ", tint = Color.White) }
+            FilledIconButton(
+                onClick = onToggleLock,
+                modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xAA0F172A))
+            ) {
+                Icon(if (locked) Icons.Default.Lock else Icons.Default.LockOpen,
+                    if (locked) "Mở khóa màn hình" else "Khóa màn hình", tint = Color.White)
+            }
+        }
     }
+}
 
-    DisposableEffect(Unit) {
-        onDispose {
-            if (isFullscreen) {
-                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                activity?.window?.let {
-                    WindowInsetsControllerCompat(it, it.decorView)
-                        .show(WindowInsetsCompat.Type.systemBars())
+/** Còn nguồn dự phòng sau nguồn đang phát (dịch vụ phát đang tự chuyển nguồn). */
+private fun Player.hasBackupSource(): Boolean {
+    val extras = mediaMetadata.extras ?: return false
+    val total = extras.getStringArray(EXTRA_SOURCES)?.size ?: return false
+    return extras.getInt(EXTRA_INDEX, 0) + 1 < total
+}
+
+private const val ERROR_TEXT = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
+
+private sealed interface ScheduleRow {
+    data class Day(val label: String) : ScheduleRow
+    data class Item(val program: Program) : ScheduleRow
+}
+
+private fun buildScheduleRows(programs: List<Program>): List<ScheduleRow> {
+    val dayFmt = SimpleDateFormat("EEEE, dd/MM", Locale("vi", "VN"))
+    val rows = ArrayList<ScheduleRow>()
+    var lastDay = ""
+    for (p in programs) {
+        val day = dayFmt.format(Date(p.start))
+        if (day != lastDay) {
+            rows += ScheduleRow.Day(day.replaceFirstChar { it.uppercase() })
+            lastDay = day
+        }
+        rows += ScheduleRow.Item(p)
+    }
+    return rows
+}
+
+@Composable
+private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: String, nowMs: Long, onDismiss: () -> Unit) {
+    val rows = remember(programs) { buildScheduleRows(programs) }
+    val listState = rememberLazyListState()
+    val nowIndex = rows.indexOfFirst { it is ScheduleRow.Item && nowMs >= it.program.start && nowMs < it.program.stop }
+    LaunchedEffect(rows) { if (nowIndex > 0) listState.scrollToItem(maxOf(0, nowIndex - 1)) }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.86f),
+            shape = RoundedCornerShape(24.dp), color = Color(0xFF0C1726), contentColor = Color.White
+        ) {
+            Column {
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Lịch phát sóng", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                        Text(channel.name, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Đóng") }
+                }
+                when {
+                    state == "loading" -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Teal)
+                    }
+                    state == "error" -> ScheduleMessage("Chưa tải được lịch phát sóng. Hãy kiểm tra kết nối mạng và mở lại.")
+                    rows.isEmpty() -> ScheduleMessage("Chưa có lịch phát sóng cho kênh này.")
+                    else -> LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(12.dp)) {
+                        items(rows) { row ->
+                            when (row) {
+                                is ScheduleRow.Day -> Text(
+                                    row.label, color = Cyan, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                                    modifier = Modifier.padding(start = 8.dp, top = 14.dp, bottom = 6.dp)
+                                )
+                                is ScheduleRow.Item -> {
+                                    val p = row.program
+                                    val live = nowMs >= p.start && nowMs < p.stop
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(RoundedCornerShape(12.dp))
+                                            .background(if (live) Color(0x222DD4BF) else Color.Transparent).padding(10.dp)
+                                    ) {
+                                        Text(formatTime(p.start), color = if (live) Teal else Muted,
+                                            fontWeight = FontWeight.Bold, modifier = Modifier.width(56.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(p.title, fontWeight = if (live) FontWeight.ExtraBold else FontWeight.SemiBold)
+                                            if (live) Text("ĐANG PHÁT · đến ${formatTime(p.stop)}", color = Teal, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            if (p.desc.isNotBlank()) Text(p.desc, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-private fun Channel.toMediaItem(): MediaItem = MediaItem.Builder()
-    .setMediaId(url)
-    .setUri(url)
-    .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(url)).build())
-    .setMediaMetadata(
-        MediaMetadata.Builder().setTitle(name).setArtist(group)
-            .apply { if (logo.isNotBlank()) setArtworkUri(Uri.parse(logo)) }
-            .build()
+@Composable
+private fun ScheduleMessage(text: String) {
+    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Default.Schedule, null, tint = Muted, modifier = Modifier.size(38.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(text, color = Muted)
+        }
+    }
+}
+
+@Composable
+private fun SourcesDialog(urls: List<String>, onAdd: (String) -> Unit, onRemove: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Nguồn phát dự phòng của bạn") },
+        text = {
+            Column {
+                Text(
+                    "Dán liên kết danh sách M3U/M3U8 của bạn. Kênh trùng tên (ví dụ VTV1) sẽ được gộp vào làm nguồn dự phòng; " +
+                        "kênh mới sẽ xuất hiện trong mục Tất cả. Chỉ dùng nguồn bạn có quyền xem.",
+                    color = Muted, fontSize = 12.sp, lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true,
+                    placeholder = { Text("https://…/danh-sach.m3u") }, modifier = Modifier.fillMaxWidth()
+                )
+                urls.forEach { u ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(u, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { onRemove(u) }) { Icon(Icons.Default.Delete, "Xóa nguồn") }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onAdd(text.trim()); text = "" }, enabled = text.trim().startsWith("http")) { Text("THÊM") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("ĐÓNG") } }
     )
-    .build()
+}
+
+/**
+ * Chỉ nạp MỘT nguồn (chỉ số index). Toàn bộ nguồn của kênh nằm trong siêu dữ liệu để dịch vụ phát
+ * tự chuyển sang nguồn dự phòng khi luồng hiện tại lỗi.
+ */
+private fun Channel.toMediaItem(index: Int): MediaItem {
+    val src = sources[index.coerceIn(0, sources.lastIndex)]
+    val extras = Bundle().apply {
+        putStringArray(EXTRA_SOURCES, sources.map { it.url }.toTypedArray())
+        putInt(EXTRA_INDEX, sources.indexOf(src))
+    }
+    return MediaItem.Builder()
+        .setMediaId(src.url)
+        .setUri(src.url)
+        .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(src.url)).build())
+        .setMediaMetadata(
+            MediaMetadata.Builder().setTitle(name).setArtist(group).setExtras(extras)
+                .apply {
+                    if (src.note.isNotBlank()) setSubtitle(src.note)
+                    if (logo.isNotBlank()) setArtworkUri(Uri.parse(logo))
+                }
+                .build()
+        )
+        .build()
+}
 
 @Composable
 private fun ChannelPane(
@@ -912,7 +1090,7 @@ private fun ChannelPane(
                 }
                 else -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(8.dp)) {
                     items(channels, key = { it.id + it.url }) { channel ->
-                        ChannelRow(channel, selected?.url == channel.url) { onChoose(channel) }
+                        ChannelRow(channel, selected?.name == channel.name) { onChoose(channel) }
                     }
                 }
             }
@@ -937,7 +1115,8 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(channel.name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(channel.group, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (channel.sources.size > 1) "${channel.group} · ${channel.sources.size} nguồn" else channel.group,
+                color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Icon(Icons.Default.PlayArrow, "Phát", tint = if (selected) Teal else Muted)
     }
@@ -946,11 +1125,13 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit)
 private suspend fun loadChannels(context: Context): List<Channel> = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
-    val list = coroutineScope {
-        PLAYLISTS.map { (category, url) ->
+    // Nguồn riêng của người dùng xếp cuối: đóng vai trò nguồn dự phòng cho kênh trùng tên
+    val playlists = PLAYLISTS + loadCustomPlaylists(context).map { "Nguồn riêng" to it }
+    val all = coroutineScope {
+        playlists.map { (category, url) ->
             async {
                 // Có mạng: tải mới và lưu cache. Mất mạng/lỗi nguồn: dùng bản cache gần nhất.
-                val cache = File(context.cacheDir, "playlist-${category.hashCode()}.m3u")
+                val cache = File(context.cacheDir, "playlist-${url.hashCode()}.m3u")
                 val text = runCatching {
                     val request = Request.Builder().url(url)
                         .header("User-Agent", "TV-Dr-Vu-Android/${BuildConfig.VERSION_NAME}").build()
@@ -963,54 +1144,28 @@ private suspend fun loadChannels(context: Context): List<Channel> = withContext(
                 text?.let { parseM3u(it, category) }.orEmpty()
             }
         }.awaitAll().flatten()
-            .filterNot { it.name.contains("geo-blocked", true) || it.name.contains("[geo", true) }
-            .distinctBy { it.url }
     }
+    // Gộp nguồn cùng kênh; nguồn chặn vùng (Geo) không còn bị ẩn mà xếp cuối làm dự phòng
+    val list = mergeChannels(all)
     check(list.isNotEmpty()) { "Không có kênh nào" }
     list
 }
 
-private val M3U_ATTR = Regex("""([A-Za-z0-9_-]+)="([^"]*)"""")
+private fun loadCustomPlaylists(context: Context): List<String> =
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("custom_playlists", "").orEmpty()
+        .split('\n').map { it.trim() }.filter { it.startsWith("http") }
 
-private fun extinfName(info: String): String {
-    var inQuote = false
-    for (i in info.indices) {
-        val c = info[i]
-        if (c == '"') inQuote = !inQuote
-        else if (c == ',' && !inQuote) return info.substring(i + 1).trim()
-    }
-    return ""
+private fun saveCustomPlaylists(context: Context, urls: List<String>) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        .putString("custom_playlists", urls.joinToString("\n")).apply()
 }
 
-// Một lượt quét O(n); dấu phẩy trong group-title không làm hỏng tên kênh
-private fun parseM3u(text: String, category: String): List<Channel> {
-    val result = LinkedHashMap<String, Channel>()
-    var pending: String? = null
-    for (raw in text.lineSequence()) {
-        val line = raw.trim()
-        if (line.startsWith("#EXTINF")) {
-            pending = line
-            continue
-        }
-        if (line.isEmpty() || line.startsWith("#")) continue
-        val info = pending
-        pending = null
-        if (info == null || !line.startsWith("http") || result.containsKey(line)) continue
-        val attrs = M3U_ATTR.findAll(info).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
-        val name = extinfName(info).ifBlank { attrs["tvg-name"].orEmpty() }
-        if (name.isBlank()) continue
-        val rawGroup = attrs["group-title"].orEmpty()
-        val group = rawGroup.takeUnless { it.isBlank() || it.equals("undefined", true) } ?: "Việt Nam"
-        val id = attrs["tvg-id"].orEmpty().ifBlank { name }
-        result[line] = Channel(id, name, attrs["tvg-logo"].orEmpty(), group, line, category)
-    }
-    return result.values.toList()
-}
+private fun formatTime(ms: Long): String = SimpleDateFormat("HH:mm", Locale.US).format(Date(ms))
 
 private fun pickInitial(context: Context, list: List<Channel>, current: Channel?): Channel? {
-    current?.let { c -> list.firstOrNull { it.url == c.url }?.let { return it } }
+    current?.let { c -> list.firstOrNull { it.name == c.name }?.let { return it } }
     val last = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("last_channel_url", null)
-    return list.firstOrNull { it.url == last } ?: list.firstOrNull()
+    return list.firstOrNull { it.hasUrl(last) } ?: list.firstOrNull()
 }
 
 private fun loadIds(context: Context, key: String): Set<String> =

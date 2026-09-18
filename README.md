@@ -19,6 +19,29 @@
 
 APK debug nằm tại `app/build/outputs/apk/debug/app-debug.apk`.
 
+## Cập nhật v3.1.0
+
+**Toàn màn hình và xoay màn hình (viết lại)**
+- Toàn màn hình nay nằm ngay trên cửa sổ chính (không còn dùng hộp thoại), nên thanh hệ thống ẩn đúng và màn hình luôn sáng khi xem.
+- Xoay điện thoại ngang: tự vào toàn màn hình; xoay dọc: tự thoát. Bấm nút toàn màn hình: khóa ngang.
+- Thoát toàn màn hình: giữ chế độ dọc cho tới khi bạn thật sự cầm điện thoại dọc, rồi trả lại tự xoay
+  (sửa lỗi kẹt chế độ dọc, xoay lần sau không ăn).
+- Vuốt dọc **nửa trái** chỉnh độ sáng, **nửa phải** chỉnh âm lượng; chạm nhẹ ở bất kỳ đâu vẫn hiện/ẩn thanh điều khiển.
+  Thoát toàn màn hình thì độ sáng trả về theo hệ thống.
+
+**Lịch phát sóng từng kênh**
+- Nút LỊCH PHÁT SÓNG mở danh sách chương trình theo ngày, đánh dấu chương trình đang phát và tự cuộn tới đó.
+- Dòng "Đang phát: …" hiện ngay dưới tên kênh.
+- Dữ liệu từ dịch vụ EPG Việt Nam (lichphatsong.io.vn); ghép được khoảng 75/80 kênh trong danh sách VN.
+
+**Luồng dự phòng**
+- Các mục cùng kênh được gộp thành một kênh nhiều nguồn (VTV1–VTV9 có 4–6 nguồn); danh sách không còn lặp kênh.
+- Nguồn bị chặn vùng (Geo-blocked) không còn bị ẩn, mà xếp cuối làm dự phòng. 8 kênh trước đây mất hẳn vì chỉ có nguồn loại này.
+- Luồng lỗi thì dịch vụ phát tự chuyển sang nguồn kế tiếp (kể cả khi app ở nền). Nút ĐỔI NGUỒN để chuyển tay.
+- Thêm danh sách tiếng Việt của iptv-org làm nguồn bổ sung.
+- Menu Tiện ích → **Nguồn phát dự phòng của bạn…**: dán liên kết M3U riêng; kênh trùng tên được gộp làm nguồn dự phòng.
+- Trình phát dùng user-agent như trình duyệt và cho phép chuyển hướng http↔https (nguyên nhân phổ biến khiến một số luồng không phát).
+
 ## Cập nhật v3.0.0
 
 **Kiến trúc phát:** một trình phát duy nhất chạy trong `PlaybackService` (Media3 `MediaSessionService`); giao diện

@@ -2,6 +2,8 @@ package cloud.huyenvu.tv
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -9,8 +11,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
@@ -27,7 +31,14 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        // Nhiều luồng IPTV chặn user-agent mặc định của ExoPlayer hoặc chuyển hướng http -> https
+        val http = DefaultHttpDataSource.Factory()
+            .setUserAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(15_000)
         val player = ExoPlayer.Builder(this, DefaultRenderersFactory(this).setEnableDecoderFallback(true))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(http))
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
@@ -38,6 +49,9 @@ class PlaybackService : MediaSessionService() {
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                     player.seekToDefaultPosition()
                     player.prepare()
+                } else {
+                    // Luồng hỏng: tự chuyển sang nguồn dự phòng kế tiếp của cùng kênh (kể cả khi app ở nền)
+                    player.tryNextSource()
                 }
             }
         })
@@ -50,6 +64,30 @@ class PlaybackService : MediaSessionService() {
             .setCallback(ResolveUriCallback)
             .setSessionActivity(openApp)
             .build()
+    }
+
+    /** Chỉ nạp một nguồn mỗi lần (không nạp cả danh sách) để không tải song song nhiều luồng HLS. */
+    private fun ExoPlayer.tryNextSource(): Boolean {
+        val item = currentMediaItem ?: return false
+        val extras = item.mediaMetadata.extras ?: return false
+        val urls = extras.getStringArray(EXTRA_SOURCES) ?: return false
+        val next = extras.getInt(EXTRA_INDEX, 0) + 1
+        if (next >= urls.size) return false
+        val uri = Uri.parse(urls[next])
+        val nextItem = item.buildUpon()
+            .setMediaId(urls[next])
+            .setUri(uri)
+            .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(uri).build())
+            .setMediaMetadata(
+                item.mediaMetadata.buildUpon()
+                    .setExtras(Bundle(extras).apply { putInt(EXTRA_INDEX, next) })
+                    .build()
+            )
+            .build()
+        setMediaItem(nextItem)
+        prepare()
+        play()
+        return true
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
