@@ -2,8 +2,10 @@ package cloud.huyenvu.tv
 
 import android.Manifest
 import android.app.AlarmManager
+import android.app.DatePickerDialog
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -128,6 +130,7 @@ private fun TVDrVuApp(pipMode: Boolean) {
     var dataSaver by remember { mutableStateOf(context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).getBoolean("data_saver", false)) }
     var sleepMinutes by remember { mutableStateOf<Int?>(null) }
     var sleepKey by remember { mutableIntStateOf(0) }
+    var screenLocked by remember { mutableStateOf(false) }
     val recording by RecorderState.isRecording.collectAsState()
 
     LaunchedEffect(sleepKey, sleepMinutes) {
@@ -195,10 +198,13 @@ private fun TVDrVuApp(pipMode: Boolean) {
             }
         }
         BackHandler {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            if (!screenLocked) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            VideoPlayer(landscapeChannel.url, dataSaver, controls = true, landscapeHost = true)
+            VideoPlayer(
+                landscapeChannel.url, dataSaver, controls = !screenLocked, landscapeHost = true,
+                locked = screenLocked, onToggleLock = { screenLocked = !screenLocked }
+            )
         }
         return
     }
@@ -226,23 +232,43 @@ private fun TVDrVuApp(pipMode: Boolean) {
                     PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
                         favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
                     }, { toggleRecording(context, selected, recording) },
-                        { enterPip(context) }, { minutes -> selected?.let { scheduleReminder(context, it, minutes); message = "Đã hẹn nhắc sau $minutes phút." } }, Modifier.weight(1.65f))
+                        { enterPip(context) }, { minutes -> selected?.let { channel ->
+                            if (minutes > 0) {
+                                scheduleReminder(context, channel, minutes)
+                                message = "Đã hẹn nhắc sau $minutes phút."
+                            } else pickReminderDateTime(context, channel) { text -> message = text }
+                        } }, Modifier.weight(1.65f))
                     ChannelPane(visible, selected, query, category, tab, loading,
                         onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
                         modifier = Modifier.weight(.85f))
                 }
             } else {
-                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-                    item {
+                Column(Modifier.fillMaxSize()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp).aspectRatio(16 / 9f),
+                        shape = RoundedCornerShape(18.dp), color = Color.Black, shadowElevation = 16.dp
+                    ) {
+                        selected?.let { VideoPlayer(it.url, dataSaver) } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Chọn một kênh để bắt đầu", color = Muted)
+                        }
+                    }
+                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+                        item {
                         PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
                             favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
                         }, { toggleRecording(context, selected, recording) },
-                            { enterPip(context) }, { minutes -> selected?.let { scheduleReminder(context, it, minutes); message = "Đã hẹn nhắc sau $minutes phút." } }, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
-                    }
-                    item {
+                            { enterPip(context) }, { minutes -> selected?.let { channel ->
+                                if (minutes > 0) {
+                                    scheduleReminder(context, channel, minutes)
+                                    message = "Đã hẹn nhắc sau $minutes phút."
+                                } else pickReminderDateTime(context, channel) { text -> message = text }
+                            } }, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), showVideo = false)
+                        }
+                        item {
                         ChannelPane(visible, selected, query, category, tab, loading,
                             onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
                             modifier = Modifier.padding(horizontal = 16.dp).heightIn(min = 420.dp, max = 620.dp))
+                        }
                     }
                 }
             }
@@ -312,11 +338,12 @@ private fun AppHeader(
 @Composable
 private fun PlayerPane(
     selected: Channel?, recording: Boolean, dataSaver: Boolean, favorite: Boolean, onFavorite: (String) -> Unit,
-    onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier
+    onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier,
+    showVideo: Boolean = true
 ) {
     var reminderMenu by remember { mutableStateOf(false) }
     Column(modifier) {
-        Surface(
+        if (showVideo) Surface(
             modifier = Modifier.fillMaxWidth().aspectRatio(16 / 9f),
             shape = RoundedCornerShape(20.dp), color = Color.Black,
             shadowElevation = 24.dp, tonalElevation = 4.dp
@@ -359,6 +386,12 @@ private fun PlayerPane(
                     listOf(5, 15, 30, 60).forEach { minutes ->
                         DropdownMenuItem(text = { Text("Sau $minutes phút") }, onClick = { onReminder(minutes); reminderMenu = false })
                     }
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Chọn ngày và giờ…") },
+                        leadingIcon = { Icon(Icons.Default.CalendarMonth, null) },
+                        onClick = { onReminder(0); reminderMenu = false }
+                    )
                 }
             }
         }
@@ -382,7 +415,10 @@ private fun PlayerPane(
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = true, landscapeHost: Boolean = false) {
+private fun VideoPlayer(
+    url: String, dataSaver: Boolean, controls: Boolean = true, landscapeHost: Boolean = false,
+    locked: Boolean = false, onToggleLock: () -> Unit = {}
+) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     var isFullscreen by remember { mutableStateOf(false) }
@@ -461,6 +497,22 @@ private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = tru
                             Text("THỬ LẠI", color = Color.White)
                         }
                     }
+                }
+            }
+            if (landscapeHost) {
+                if (locked) Box(
+                    Modifier.fillMaxSize().clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) {}
+                )
+                FilledIconButton(
+                    onClick = onToggleLock,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xAA0F172A))
+                ) {
+                    Icon(if (locked) Icons.Default.Lock else Icons.Default.LockOpen,
+                        if (locked) "Mở khóa màn hình" else "Khóa màn hình", tint = Color.White)
                 }
             }
         }
@@ -630,6 +682,10 @@ private fun enterPip(context: Context) {
 }
 
 private fun scheduleReminder(context: Context, channel: Channel, minutes: Int) {
+    scheduleReminderAt(context, channel, System.currentTimeMillis() + minutes * 60_000L)
+}
+
+private fun scheduleReminderAt(context: Context, channel: Channel, triggerAt: Long) {
     if (Build.VERSION.SDK_INT >= 33 &&
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
     ) {
@@ -643,7 +699,32 @@ private fun scheduleReminder(context: Context, channel: Channel, minutes: Int) {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
     val alarm = context.getSystemService(AlarmManager::class.java)
-    alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + minutes * 60_000L, pending)
+    alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+}
+
+private fun pickReminderDateTime(context: Context, channel: Channel, onResult: (String) -> Unit) {
+    val now = Calendar.getInstance()
+    DatePickerDialog(
+        context,
+        { _, year, month, day ->
+            TimePickerDialog(
+                context,
+                { _, hour, minute ->
+                    val chosen = Calendar.getInstance().apply {
+                        set(year, month, day, hour, minute, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    if (chosen.timeInMillis <= System.currentTimeMillis()) {
+                        onResult("Thời gian nhắc phải ở tương lai.")
+                    } else {
+                        scheduleReminderAt(context, channel, chosen.timeInMillis)
+                        val label = java.text.SimpleDateFormat("HH:mm • dd/MM/yyyy", Locale("vi", "VN")).format(chosen.time)
+                        onResult("Đã hẹn ${channel.name} lúc $label.")
+                    }
+                }, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE), true
+            ).show()
+        }, now.get(Calendar.YEAR), now.get(Calendar.MONTH), now.get(Calendar.DAY_OF_MONTH)
+    ).apply { datePicker.minDate = System.currentTimeMillis() - 1000 }.show()
 }
 
 private fun openRecordings(context: Context) {
