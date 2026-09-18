@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -37,6 +38,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -111,6 +113,8 @@ private fun TVDrVuTheme(content: @Composable () -> Unit) {
 @Composable
 private fun TVDrVuApp(pipMode: Boolean) {
     val context = LocalContext.current
+    val activity = context as? ComponentActivity
+    val configuration = LocalConfiguration.current
     val scope = rememberCoroutineScope()
     var channels by remember { mutableStateOf<List<Channel>>(emptyList()) }
     var selected by remember { mutableStateOf<Channel?>(null) }
@@ -167,6 +171,33 @@ private fun TVDrVuApp(pipMode: Boolean) {
     if (pipMode) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             selected?.let { VideoPlayer(it.url, dataSaver, controls = false) }
+        }
+        return
+    }
+
+    val phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+        configuration.screenHeightDp < 600
+    if (phoneLandscape && selected != null) {
+        DisposableEffect(Unit) {
+            activity?.window?.let { window ->
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    hide(WindowInsetsCompat.Type.systemBars())
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            }
+            onDispose {
+                activity?.window?.let { window ->
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
+        BackHandler {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            VideoPlayer(selected.url, dataSaver, controls = true, landscapeHost = true)
         }
         return
     }
@@ -350,7 +381,7 @@ private fun PlayerPane(
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = true) {
+private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = true, landscapeHost: Boolean = false) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     var isFullscreen by remember { mutableStateOf(false) }
@@ -404,7 +435,11 @@ private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = tru
                     (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
                         this.player = player
                         useController = controls
-                        if (controls) setFullscreenButtonClickListener { setFullscreen(it) }
+                        if (controls) setFullscreenButtonClickListener { enabled ->
+                            if (landscapeHost && !enabled) {
+                                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            } else setFullscreen(enabled)
+                        }
                     }
                 },
                 update = { it.player = player; it.useController = controls },
