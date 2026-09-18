@@ -71,6 +71,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -94,6 +95,12 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+import com.google.mlkit.nl.languageid.LanguageIdentification
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.common.model.DownloadConditions
 
 private val PLAYLISTS = listOf(
     "Việt Nam" to "https://iptv-org.github.io/iptv/countries/vn.m3u",
@@ -113,6 +120,7 @@ private val Cyan = Color(0xFF22D3EE)
 private val Muted = Color(0xFF94A3B8)
 
 enum class ChannelTab { ALL, FAVORITES, RECENT }
+private enum class SubtitleMode { OFF, ORIGINAL, VIETNAMESE }
 
 class MainActivity : ComponentActivity() {
     companion object { const val EXTRA_OPEN_URL = "open_url" }
@@ -799,6 +807,70 @@ private fun VideoPlayer(
     }
     var buffering by remember(target) { mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING) }
     val swipe = remember { SwipeTouchListener(context, activity) { kind, percent -> hudKind = kind; hudPercent = percent } }
+    val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+    var channelKey by remember(target) { mutableStateOf(target?.currentMediaItem?.mediaId.orEmpty()) }
+    var subtitleMode by remember(channelKey) {
+        mutableStateOf(
+            runCatching { SubtitleMode.valueOf(prefs.getString("subtitle_$channelKey", SubtitleMode.OFF.name)!!) }
+                .getOrDefault(SubtitleMode.OFF)
+        )
+    }
+    var originalSubtitle by remember(target) { mutableStateOf("") }
+    var translatedSubtitle by remember(target) { mutableStateOf("") }
+    var subtitleStatus by remember(target) { mutableStateOf<String?>(null) }
+    var translator by remember { mutableStateOf<Translator?>(null) }
+    val languageIdentifier = remember { LanguageIdentification.getClient() }
+
+    fun saveMode(mode: SubtitleMode) {
+        subtitleMode = mode
+        prefs.edit().putString("subtitle_$channelKey", mode.name).apply()
+        if (mode == SubtitleMode.VIETNAMESE && originalSubtitle.isBlank()) {
+            subtitleStatus = "Kênh chưa cung cấp phụ đề"
+        } else if (mode != SubtitleMode.VIETNAMESE) subtitleStatus = null
+    }
+
+    fun translateCue(text: String) {
+        if (text.isBlank() || subtitleMode != SubtitleMode.VIETNAMESE) return
+        subtitleStatus = "Đang nhận diện và tải bộ dịch…"
+        languageIdentifier.identifyLanguage(text)
+            .addOnSuccessListener { tag ->
+                if (tag == "und") {
+                    subtitleStatus = "Không nhận diện được ngôn ngữ phụ đề"
+                    return@addOnSuccessListener
+                }
+                val source = TranslateLanguage.fromLanguageTag(tag)
+                if (source == null) {
+                    subtitleStatus = "Chưa hỗ trợ dịch ngôn ngữ này"
+                    return@addOnSuccessListener
+                }
+                if (source == TranslateLanguage.VIETNAMESE) {
+                    translatedSubtitle = text
+                    subtitleStatus = null
+                    return@addOnSuccessListener
+                }
+                translator?.close()
+                val client = Translation.getClient(
+                    TranslatorOptions.Builder()
+                        .setSourceLanguage(source)
+                        .setTargetLanguage(TranslateLanguage.VIETNAMESE)
+                        .build()
+                )
+                translator = client
+                client.downloadModelIfNeeded(DownloadConditions.Builder().build())
+                    .addOnSuccessListener {
+                        client.translate(text)
+                            .addOnSuccessListener { result ->
+                                if (subtitleMode == SubtitleMode.VIETNAMESE && originalSubtitle == text) {
+                                    translatedSubtitle = result
+                                    subtitleStatus = null
+                                }
+                            }
+                            .addOnFailureListener { subtitleStatus = "Không dịch được phụ đề" }
+                    }
+                    .addOnFailureListener { subtitleStatus = "Không tải được bộ dịch · kiểm tra Internet" }
+            }
+            .addOnFailureListener { subtitleStatus = "Không nhận diện được ngôn ngữ" }
+    }
 
     LaunchedEffect(hudKind, hudPercent) {
         if (hudKind >= 0) { delay(700); hudKind = -1 }
@@ -807,8 +879,18 @@ private fun VideoPlayer(
         onDispose { if (fullscreen) swipe.resetBrightness() }
     }
 
-    DisposableEffect(target) {
+    DisposableEffect(target, subtitleMode) {
         val listener = object : Player.Listener {
+            override fun onCues(cueGroup: CueGroup) {
+                val text = cueGroup.cues.mapNotNull { it.text?.toString()?.trim() }
+                    .filter { it.isNotBlank() }.joinToString("\n")
+                originalSubtitle = text
+                if (text.isBlank()) {
+                    translatedSubtitle = ""
+                } else if (subtitleMode == SubtitleMode.VIETNAMESE && text != translatedSubtitle) {
+                    translateCue(text)
+                }
+            }
             override fun onPlayerError(error: PlaybackException) {
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) return
                 buffering = true
@@ -828,12 +910,24 @@ private fun VideoPlayer(
                 if (state == Player.STATE_READY) playbackError = null
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                channelKey = mediaItem?.mediaId.orEmpty()
                 playbackError = null
                 buffering = true
             }
         }
         target?.addListener(listener)
         onDispose { target?.removeListener(listener) }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            translator?.close()
+            languageIdentifier.close()
+        }
+    }
+
+    LaunchedEffect(subtitleMode, originalSubtitle) {
+        if (subtitleMode == SubtitleMode.VIETNAMESE && originalSubtitle.isNotBlank()) translateCue(originalSubtitle)
     }
 
     BackHandler(enabled = fullscreen) { if (locked) onToggleLock() else onFullscreenClick() }
@@ -851,11 +945,56 @@ private fun VideoPlayer(
             update = {
                 it.player = target
                 it.useController = controls && !locked
+                it.subtitleView?.visibility = if (subtitleMode == SubtitleMode.ORIGINAL) View.VISIBLE else View.GONE
                 swipe.enabled = fullscreen && !locked
             },
             // Nhiều PlayerView có thể cùng gắn một trình phát: view bị gỡ phải nhả trình phát ra
             onRelease = { it.player = null; it.setOnTouchListener(null) },
             modifier = Modifier.fillMaxSize()
+        )
+        val subtitleText = when (subtitleMode) {
+            SubtitleMode.OFF -> ""
+            SubtitleMode.ORIGINAL -> "" // Media3 tự vẽ phụ đề gốc đúng định dạng/định vị.
+            SubtitleMode.VIETNAMESE -> translatedSubtitle
+        }
+        if (subtitleText.isNotBlank()) Text(
+            text = subtitleText,
+            color = Color.White,
+            fontSize = if (fullscreen) 20.sp else 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .padding(horizontal = 24.dp, vertical = if (fullscreen) 72.dp else 54.dp)
+                .background(Color(0xB3000000), RoundedCornerShape(6.dp))
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        )
+        if (subtitleMode == SubtitleMode.VIETNAMESE && subtitleStatus != null) Text(
+            text = subtitleStatus!!,
+            color = Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .padding(bottom = if (fullscreen) 70.dp else 52.dp)
+                .background(Color(0xB30F172A), RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        )
+        if (!locked) AssistChip(
+            onClick = {
+                saveMode(when (subtitleMode) {
+                    SubtitleMode.OFF -> SubtitleMode.ORIGINAL
+                    SubtitleMode.ORIGINAL -> SubtitleMode.VIETNAMESE
+                    SubtitleMode.VIETNAMESE -> SubtitleMode.OFF
+                })
+            },
+            label = { Text(when (subtitleMode) {
+                SubtitleMode.OFF -> "CC TẮT"
+                SubtitleMode.ORIGINAL -> "CC GỐC"
+                SubtitleMode.VIETNAMESE -> "🌐 TIẾNG VIỆT"
+            }, fontSize = 11.sp) },
+            modifier = Modifier.align(Alignment.BottomStart).padding(10.dp),
+            colors = AssistChipDefaults.assistChipColors(
+                containerColor = if (subtitleMode == SubtitleMode.OFF) Color(0xAA0F172A) else Color(0xDD0F766E),
+                labelColor = Color.White
+            )
         )
         if (buffering) CircularProgressIndicator(
             modifier = Modifier.align(Alignment.Center).size(42.dp), color = Teal, strokeWidth = 4.dp

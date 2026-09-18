@@ -1,5 +1,13 @@
 # TV Dr Vũ — Android
 
+## Cập nhật v3.3.0
+
+- Nút phụ đề trên trình phát: **CC TẮT → CC GỐC → 🌐 TIẾNG VIỆT**.
+- Đọc phụ đề/closed-caption có sẵn trong luồng bằng Media3.
+- Tự nhận diện ngôn ngữ và dịch sang tiếng Việt ngay trên thiết bị bằng Google ML Kit.
+- Gói ngôn ngữ được tải khi dùng lần đầu; lựa chọn được lưu riêng theo từng kênh.
+- Nếu kênh không phát kèm phụ đề, ứng dụng thông báo rõ thay vì hiển thị phụ đề giả.
+
 ## Cập nhật v3.2.0
 
 - Lịch phát sóng 3 ngày: **Hôm qua • Hôm nay • Ngày mai**.
