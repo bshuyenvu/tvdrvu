@@ -177,7 +177,8 @@ private fun TVDrVuApp(pipMode: Boolean) {
 
     val phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
         configuration.screenHeightDp < 600
-    if (phoneLandscape && selected != null) {
+    val landscapeChannel = selected
+    if (phoneLandscape && landscapeChannel != null) {
         DisposableEffect(Unit) {
             activity?.window?.let { window ->
                 WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -197,7 +198,7 @@ private fun TVDrVuApp(pipMode: Boolean) {
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            VideoPlayer(selected.url, dataSaver, controls = true, landscapeHost = true)
+            VideoPlayer(landscapeChannel.url, dataSaver, controls = true, landscapeHost = true)
         }
         return
     }
