@@ -1,9 +1,11 @@
 package cloud.huyenvu.tv
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.net.Uri
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
@@ -40,6 +42,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -93,6 +97,7 @@ private fun TVDrVuApp() {
     var message by remember { mutableStateOf<String?>(null) }
     var favorites by remember { mutableStateOf(loadIds(context, "favorites")) }
     var recent by remember { mutableStateOf(loadIds(context, "recent")) }
+    val recording by RecorderState.isRecording.collectAsState()
 
     LaunchedEffect(Unit) {
         runCatching { loadChannels() }
@@ -133,9 +138,9 @@ private fun TVDrVuApp() {
             AppHeader()
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    PlayerPane(selected, selected?.id in favorites, { id ->
+                    PlayerPane(selected, recording, selected?.id in favorites, { id ->
                         favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                    }, { openVlc(context, selected?.url) }, Modifier.weight(1.65f))
+                    }, { toggleRecording(context, selected, recording) }, Modifier.weight(1.65f))
                     ChannelPane(visible, selected, query, tab, loading,
                         onQuery = { query = it }, onTab = { tab = it }, onChoose = ::choose,
                         modifier = Modifier.weight(.85f))
@@ -143,9 +148,9 @@ private fun TVDrVuApp() {
             } else {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
                     item {
-                        PlayerPane(selected, selected?.id in favorites, { id ->
+                        PlayerPane(selected, recording, selected?.id in favorites, { id ->
                             favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                        }, { openVlc(context, selected?.url) }, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
+                        }, { toggleRecording(context, selected, recording) }, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
                     }
                     item {
                         ChannelPane(visible, selected, query, tab, loading,
@@ -193,8 +198,8 @@ private fun AppHeader() {
 
 @Composable
 private fun PlayerPane(
-    selected: Channel?, favorite: Boolean, onFavorite: (String) -> Unit,
-    onOpenVlc: () -> Unit, modifier: Modifier = Modifier
+    selected: Channel?, recording: Boolean, favorite: Boolean, onFavorite: (String) -> Unit,
+    onRecord: () -> Unit, modifier: Modifier = Modifier
 ) {
     Column(modifier) {
         Surface(
@@ -229,11 +234,18 @@ private fun PlayerPane(
             }
         }
         Spacer(Modifier.height(14.dp))
-        Button(onClick = onOpenVlc, enabled = selected != null, modifier = Modifier.fillMaxWidth().height(54.dp),
-            shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal, contentColor = Color(0xFF031313))) {
-            Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(9.dp)); Text("MỞ BẰNG VLC", fontWeight = FontWeight.ExtraBold)
+        Button(onClick = onRecord, enabled = selected != null, modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (recording) Color(0xFFDC2626) else Teal,
+                contentColor = if (recording) Color.White else Color(0xFF031313)
+            )) {
+            Icon(if (recording) Icons.Default.StopCircle else Icons.Default.FiberManualRecord, null)
+            Spacer(Modifier.width(9.dp))
+            Text(if (recording) "DỪNG VÀ LƯU BẢN GHI" else "GHI CHƯƠNG TRÌNH", fontWeight = FontWeight.ExtraBold)
         }
-        Text("Một số kênh có thể giới hạn theo khu vực. TV Dr Vũ không lưu trữ nội dung truyền hình.",
+        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/TV Dr Vũ."
+            else "Bản ghi chỉ dùng cá nhân và phụ thuộc quyền truy cập của từng luồng phát.",
             color = Color(0xFF64748B), fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
     }
 }
@@ -415,10 +427,19 @@ private fun saveIds(context: Context, key: String, ids: Set<String>) {
 
 private fun toggleId(ids: Set<String>, id: String) = if (id in ids) ids - id else ids + id
 
-private fun openVlc(context: Context, url: String?) {
-    if (url.isNullOrBlank()) return
-    val vlc = Intent(Intent.ACTION_VIEW, Uri.parse("vlc://${url.removePrefix("https://").removePrefix("http://")}"))
-    runCatching { context.startActivity(vlc) }.onFailure {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+private fun toggleRecording(context: Context, channel: Channel?, recording: Boolean) {
+    if (channel == null) return
+    if (Build.VERSION.SDK_INT >= 33 &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+        (context as? ComponentActivity)?.let {
+            ActivityCompat.requestPermissions(it, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1101)
+        }
     }
+    val intent = Intent(context, RecordingService::class.java).apply {
+        action = if (recording) RecordingService.ACTION_STOP else RecordingService.ACTION_START
+        putExtra(RecordingService.EXTRA_URL, channel.url)
+        putExtra(RecordingService.EXTRA_NAME, channel.name)
+    }
+    if (recording) context.startService(intent) else ContextCompat.startForegroundService(context, intent)
 }
