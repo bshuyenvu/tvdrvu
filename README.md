@@ -1,8 +1,13 @@
-# TheVu TV — Android
+# theVũ TV — Android
+
+## Cập nhật v3.4.1
+
+- Chuẩn hóa toàn bộ tên ứng dụng thành **theVũ TV**.
+- Logo hiển thị liền mạch **theVũTV**, giữ đúng chữ hoa/thường và dấu tiếng Việt.
 
 ## Cập nhật v3.4.0
 
-- Đổi tên ứng dụng thành **TheVu TV** và bổ sung logo chữ liền mạch hai màu.
+- Đổi nhận diện ứng dụng và bổ sung logo chữ liền mạch hai màu.
 - Đồng bộ giao diện xanh đen, cyan và vàng cam theo nhận diện mới.
 - Thêm hướng dẫn sử dụng chỉ hiển thị một lần sau lần cài đặt đầu tiên.
 

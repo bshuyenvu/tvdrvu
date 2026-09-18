@@ -12,7 +12,7 @@
   <rect x="38" y="38" width="436" height="436" rx="94" fill="none" stroke="#22D3EE" stroke-opacity="0.18" stroke-width="4"/>
   <g filter="url(#shadow)">
     <text x="256" y="278" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="104" font-weight="800" font-style="italic" letter-spacing="-9">
-      <tspan fill="#FFB703">TheVu</tspan><tspan fill="#22D3EE">TV</tspan>
+      <tspan fill="#FFB703">theVũ</tspan><tspan fill="#22D3EE">TV</tspan>
     </text>
     <path d="M187 328 H325" stroke="#22D3EE" stroke-width="10" stroke-linecap="round"/>
     <circle cx="170" cy="328" r="9" fill="#FFB703"/>

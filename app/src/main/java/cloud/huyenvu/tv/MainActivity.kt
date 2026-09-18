@@ -625,7 +625,7 @@ private fun WelcomeDialog(onDismiss: () -> Unit) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     buildAnnotatedString {
-                        withStyle(SpanStyle(color = BrandGold)) { append("TheVu") }
+                        withStyle(SpanStyle(color = BrandGold)) { append("theVũ") }
                         withStyle(SpanStyle(color = BrandCyan)) { append("TV") }
                     },
                     fontWeight = FontWeight.ExtraBold, fontStyle = FontStyle.Italic, fontSize = 26.sp
@@ -667,14 +667,14 @@ private fun AppHeader(
     ) {
         Image(
             painter = painterResource(R.drawable.thevu_tv_icon),
-            contentDescription = "TheVu TV",
+            contentDescription = "theVũ TV",
             modifier = Modifier.size(46.dp).clip(RoundedCornerShape(14.dp))
         )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 buildAnnotatedString {
-                    withStyle(SpanStyle(color = BrandGold)) { append("TheVu") }
+                    withStyle(SpanStyle(color = BrandGold)) { append("theVũ") }
                     withStyle(SpanStyle(color = BrandCyan)) { append("TV") }
                 },
                 fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontStyle = FontStyle.Italic,
@@ -749,7 +749,7 @@ private fun PlayerPane(
                     Spacer(Modifier.width(8.dp))
                     Text("ĐANG XEM", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
                 }
-                Text(selected?.name ?: "TheVu TV", fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
+                Text(selected?.name ?: "theVũ TV", fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(selected?.group ?: "Danh sách kênh Việt Nam", color = Muted, fontSize = 14.sp)
                 if (nowPlaying != null) Text(nowPlaying, color = Teal, fontSize = 13.sp, maxLines = 2,
@@ -801,7 +801,7 @@ private fun PlayerPane(
             Spacer(Modifier.width(9.dp))
             Text(if (recording) "DỪNG VÀ LƯU BẢN GHI" else "GHI CHƯƠNG TRÌNH", fontWeight = FontWeight.ExtraBold)
         }
-        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/TheVu TV."
+        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/theVũ TV."
             else "Bản ghi chỉ dùng cá nhân và phụ thuộc quyền truy cập của từng luồng phát.",
             color = Color(0xFF64748B), fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
     }
