@@ -125,7 +125,7 @@ class RecordingService : Service() {
             }
             if (text.contains("#EXT-X-ENDLIST")) break
             if (seen.size > 3000) {
-                val keep = seen.takeLast(1000)
+                val keep = seen.toList().takeLast(1000)
                 seen.clear(); seen.addAll(keep)
             }
             delay(1800)
