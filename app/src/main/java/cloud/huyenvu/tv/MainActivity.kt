@@ -1,12 +1,17 @@
 package cloud.huyenvu.tv
 
 import android.Manifest
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
+import android.util.Rational
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -48,6 +53,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -56,14 +62,21 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-private const val PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/vn.m3u"
+private val PLAYLISTS = listOf(
+    "Việt Nam" to "https://iptv-org.github.io/iptv/countries/vn.m3u",
+    "Thể thao" to "https://iptv-org.github.io/iptv/categories/sports.m3u",
+    "Phim quốc tế" to "https://iptv-org.github.io/iptv/categories/movies.m3u",
+    "Giải trí" to "https://iptv-org.github.io/iptv/categories/entertainment.m3u",
+    "Tin tức" to "https://iptv-org.github.io/iptv/categories/news.m3u",
+    "Thiếu nhi" to "https://iptv-org.github.io/iptv/categories/kids.m3u"
+)
 private val DeepNavy = Color(0xFF050A12)
 private val SurfaceNavy = Color(0xFF0C1726)
 private val Teal = Color(0xFF2DD4BF)
 private val Cyan = Color(0xFF22D3EE)
 private val Muted = Color(0xFF94A3B8)
 
-data class Channel(val id: String, val name: String, val logo: String, val group: String, val url: String)
+data class Channel(val id: String, val name: String, val logo: String, val group: String, val url: String, val category: String)
 enum class ChannelTab { ALL, FAVORITES, RECENT }
 
 class MainActivity : ComponentActivity() {
@@ -92,12 +105,24 @@ private fun TVDrVuApp() {
     var channels by remember { mutableStateOf<List<Channel>>(emptyList()) }
     var selected by remember { mutableStateOf<Channel?>(null) }
     var query by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("Tất cả") }
     var tab by remember { mutableStateOf(ChannelTab.ALL) }
     var loading by remember { mutableStateOf(true) }
     var message by remember { mutableStateOf<String?>(null) }
     var favorites by remember { mutableStateOf(loadIds(context, "favorites")) }
     var recent by remember { mutableStateOf(loadIds(context, "recent")) }
+    var dataSaver by remember { mutableStateOf(context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).getBoolean("data_saver", false)) }
+    var sleepMinutes by remember { mutableStateOf<Int?>(null) }
+    var sleepKey by remember { mutableIntStateOf(0) }
     val recording by RecorderState.isRecording.collectAsState()
+
+    LaunchedEffect(sleepKey, sleepMinutes) {
+        val minutes = sleepMinutes ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(minutes * 60_000L)
+        selected = null
+        sleepMinutes = null
+        message = "Đã dừng phát theo hẹn giờ."
+    }
 
     LaunchedEffect(Unit) {
         runCatching { loadChannels() }
@@ -106,10 +131,11 @@ private fun TVDrVuApp() {
         loading = false
     }
 
-    val visible by remember(channels, query, tab, favorites, recent) {
+    val visible by remember(channels, query, category, tab, favorites, recent) {
         derivedStateOf {
             channels.filter {
                 (query.isBlank() || "${it.name} ${it.group}".contains(query, true)) &&
+                    (category == "Tất cả" || it.category == category) &&
                     when (tab) {
                         ChannelTab.ALL -> true
                         ChannelTab.FAVORITES -> it.id in favorites
@@ -135,26 +161,37 @@ private fun TVDrVuApp() {
     ) {
         val wide = maxWidth >= 850.dp
         Column(Modifier.fillMaxSize()) {
-            AppHeader()
+            AppHeader(
+                sleepMinutes = sleepMinutes,
+                dataSaver = dataSaver,
+                onSleep = { minutes -> sleepMinutes = minutes; sleepKey++ },
+                onDataSaver = {
+                    dataSaver = !dataSaver
+                    context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).edit().putBoolean("data_saver", dataSaver).apply()
+                },
+                onRecordings = { openRecordings(context) }
+            )
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    PlayerPane(selected, recording, selected?.id in favorites, { id ->
+                    PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
                         favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                    }, { toggleRecording(context, selected, recording) }, Modifier.weight(1.65f))
-                    ChannelPane(visible, selected, query, tab, loading,
-                        onQuery = { query = it }, onTab = { tab = it }, onChoose = ::choose,
+                    }, { toggleRecording(context, selected, recording) },
+                        { enterPip(context) }, { minutes -> selected?.let { scheduleReminder(context, it, minutes); message = "Đã hẹn nhắc sau $minutes phút." } }, Modifier.weight(1.65f))
+                    ChannelPane(visible, selected, query, category, tab, loading,
+                        onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
                         modifier = Modifier.weight(.85f))
                 }
             } else {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
                     item {
-                        PlayerPane(selected, recording, selected?.id in favorites, { id ->
+                        PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
                             favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
-                        }, { toggleRecording(context, selected, recording) }, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
+                        }, { toggleRecording(context, selected, recording) },
+                            { enterPip(context) }, { minutes -> selected?.let { scheduleReminder(context, it, minutes); message = "Đã hẹn nhắc sau $minutes phút." } }, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
                     }
                     item {
-                        ChannelPane(visible, selected, query, tab, loading,
-                            onQuery = { query = it }, onTab = { tab = it }, onChoose = ::choose,
+                        ChannelPane(visible, selected, query, category, tab, loading,
+                            onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
                             modifier = Modifier.padding(horizontal = 16.dp).heightIn(min = 420.dp, max = 620.dp))
                     }
                 }
@@ -176,7 +213,11 @@ private fun TVDrVuApp() {
 }
 
 @Composable
-private fun AppHeader() {
+private fun AppHeader(
+    sleepMinutes: Int?, dataSaver: Boolean, onSleep: (Int?) -> Unit,
+    onDataSaver: () -> Unit, onRecordings: () -> Unit
+) {
+    var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().height(70.dp).background(Color(0xDD07101D)).padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -189,18 +230,40 @@ private fun AppHeader() {
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text("TV Dr Vũ", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
-            Text("Truyền hình công khai • Việt Nam", color = Muted, fontSize = 12.sp)
+            Text("TV • Thể thao • Phim • Tin tức", color = Muted, fontSize = 12.sp)
         }
-        AssistChip(onClick = {}, label = { Text("TRỰC TIẾP", fontWeight = FontWeight.Bold) },
-            leadingIcon = { Box(Modifier.size(8.dp).background(Teal, CircleShape)) })
+        IconButton(onClick = onRecordings) { Icon(Icons.Default.VideoLibrary, "Bản ghi", tint = Teal) }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Default.Tune, "Tiện ích") }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (dataSaver) "Tắt tiết kiệm dữ liệu" else "Bật tiết kiệm dữ liệu") },
+                    leadingIcon = { Icon(Icons.Default.DataSaverOn, null) },
+                    onClick = { onDataSaver(); menu = false }
+                )
+                listOf(15, 30, 60, 90).forEach { minutes ->
+                    DropdownMenuItem(
+                        text = { Text("Hẹn tắt sau $minutes phút") },
+                        leadingIcon = { Icon(Icons.Default.Bedtime, null) },
+                        onClick = { onSleep(minutes); menu = false }
+                    )
+                }
+                if (sleepMinutes != null) DropdownMenuItem(
+                    text = { Text("Hủy hẹn giờ tắt") },
+                    leadingIcon = { Icon(Icons.Default.TimerOff, null) },
+                    onClick = { onSleep(null); menu = false }
+                )
+            }
+        }
     }
 }
 
 @Composable
 private fun PlayerPane(
-    selected: Channel?, recording: Boolean, favorite: Boolean, onFavorite: (String) -> Unit,
-    onRecord: () -> Unit, modifier: Modifier = Modifier
+    selected: Channel?, recording: Boolean, dataSaver: Boolean, favorite: Boolean, onFavorite: (String) -> Unit,
+    onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier
 ) {
+    var reminderMenu by remember { mutableStateOf(false) }
     Column(modifier) {
         Surface(
             modifier = Modifier.fillMaxWidth().aspectRatio(16 / 9f),
@@ -214,7 +277,7 @@ private fun PlayerPane(
                         Spacer(Modifier.height(10.dp)); Text("Chọn một kênh để bắt đầu", color = Muted)
                     }
                 }
-            } else VideoPlayer(selected.url)
+            } else VideoPlayer(selected.url, dataSaver)
         }
         Spacer(Modifier.height(16.dp))
         Row(verticalAlignment = Alignment.Top) {
@@ -233,6 +296,22 @@ private fun PlayerPane(
                 Icon(if (favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "Yêu thích", tint = if (favorite) Teal else Muted)
             }
         }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onPip, enabled = selected != null, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.PictureInPictureAlt, null); Spacer(Modifier.width(6.dp)); Text("CỬA SỔ NHỎ", fontSize = 11.sp)
+            }
+            Box(Modifier.weight(1f)) {
+                OutlinedButton(onClick = { reminderMenu = true }, enabled = selected != null, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.NotificationsActive, null); Spacer(Modifier.width(6.dp)); Text("NHẮC XEM", fontSize = 11.sp)
+                }
+                DropdownMenu(expanded = reminderMenu, onDismissRequest = { reminderMenu = false }) {
+                    listOf(5, 15, 30, 60).forEach { minutes ->
+                        DropdownMenuItem(text = { Text("Sau $minutes phút") }, onClick = { onReminder(minutes); reminderMenu = false })
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(9.dp))
         Spacer(Modifier.height(14.dp))
         Button(onClick = onRecord, enabled = selected != null, modifier = Modifier.fillMaxWidth().height(54.dp),
             shape = RoundedCornerShape(16.dp),
@@ -252,14 +331,17 @@ private fun PlayerPane(
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPlayer(url: String) {
+private fun VideoPlayer(url: String, dataSaver: Boolean) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     var isFullscreen by remember { mutableStateOf(false) }
     var playbackError by remember { mutableStateOf<String?>(null) }
-    val player = remember(url) {
+    val player = remember(url, dataSaver) {
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        ExoPlayer.Builder(context, renderers).build().apply {
+        val trackSelector = DefaultTrackSelector(context).apply {
+            if (dataSaver) setParameters(buildUponParameters().setMaxVideoBitrate(1_200_000).setMaxVideoSizeSd())
+        }
+        ExoPlayer.Builder(context, renderers).setTrackSelector(trackSelector).build().apply {
             setMediaItem(MediaItem.fromUri(url)); prepare(); playWhenReady = true
         }
     }
@@ -332,8 +414,8 @@ private fun VideoPlayer(url: String) {
 
 @Composable
 private fun ChannelPane(
-    channels: List<Channel>, selected: Channel?, query: String, tab: ChannelTab, loading: Boolean,
-    onQuery: (String) -> Unit, onTab: (ChannelTab) -> Unit, onChoose: (Channel) -> Unit,
+    channels: List<Channel>, selected: Channel?, query: String, category: String, tab: ChannelTab, loading: Boolean,
+    onQuery: (String) -> Unit, onCategory: (String) -> Unit, onTab: (ChannelTab) -> Unit, onChoose: (Channel) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(modifier, shape = RoundedCornerShape(20.dp), color = Color(0xE60C1726), tonalElevation = 3.dp) {
@@ -345,6 +427,18 @@ private fun ChannelPane(
                 trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { onQuery("") }) { Icon(Icons.Default.Close, "Xóa") } },
                 shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().padding(14.dp)
             )
+            androidx.compose.foundation.lazy.LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                items(listOf("Tất cả", "Việt Nam", "Thể thao", "Phim quốc tế", "Giải trí", "Tin tức", "Thiếu nhi")) { item ->
+                    FilterChip(
+                        selected = category == item,
+                        onClick = { onCategory(item) },
+                        label = { Text(item, fontSize = 11.sp) }
+                    )
+                }
+            }
             TabRow(selectedTabIndex = tab.ordinal, containerColor = Color.Transparent, contentColor = Teal) {
                 ChannelTab.entries.forEach { item ->
                     Tab(selected = tab == item, onClick = { onTab(item) },
@@ -394,14 +488,18 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit)
 
 private suspend fun loadChannels(): List<Channel> = withContext(Dispatchers.IO) {
     val client = OkHttpClient()
-    val request = Request.Builder().url(PLAYLIST_URL).header("User-Agent", "TV-Dr-Vu-Android/1.0").build()
-    client.newCall(request).execute().use { response ->
-        check(response.isSuccessful)
-        parseM3u(response.body?.string().orEmpty())
-    }
+    PLAYLISTS.flatMap { (category, url) ->
+        runCatching {
+            val request = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/2.0").build()
+            client.newCall(request).execute().use { response ->
+                check(response.isSuccessful)
+                parseM3u(response.body?.string().orEmpty(), category)
+            }
+        }.getOrDefault(emptyList())
+    }.distinctBy { it.url }
 }
 
-private fun parseM3u(text: String): List<Channel> {
+private fun parseM3u(text: String, category: String): List<Channel> {
     val lines = text.lineSequence().toList()
     val result = mutableListOf<Channel>()
     val attr = { line: String, name: String -> Regex("""$name="([^"]*)"""", RegexOption.IGNORE_CASE).find(line)?.groupValues?.get(1).orEmpty() }
@@ -413,7 +511,7 @@ private fun parseM3u(text: String): List<Channel> {
         val id = attr(line, "tvg-id").ifBlank { "$name-$index" }
         val rawGroup = attr(line, "group-title")
         val group = rawGroup.takeUnless { it.isBlank() || it.equals("undefined", true) } ?: "Việt Nam"
-        result += Channel(id, name, attr(line, "tvg-logo"), group, url)
+        result += Channel(id, name, attr(line, "tvg-logo"), group, url, category)
     }
     return result.distinctBy { it.url }
 }
@@ -442,4 +540,37 @@ private fun toggleRecording(context: Context, channel: Channel?, recording: Bool
         putExtra(RecordingService.EXTRA_NAME, channel.name)
     }
     if (recording) context.startService(intent) else ContextCompat.startForegroundService(context, intent)
+}
+
+private fun enterPip(context: Context) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        (context as? ComponentActivity)?.enterPictureInPictureMode(
+            PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
+        )
+    }
+}
+
+private fun scheduleReminder(context: Context, channel: Channel, minutes: Int) {
+    if (Build.VERSION.SDK_INT >= 33 &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+        (context as? ComponentActivity)?.let {
+            ActivityCompat.requestPermissions(it, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1102)
+        }
+    }
+    val intent = Intent(context, ReminderReceiver::class.java).putExtra("channel_name", channel.name)
+    val pending = PendingIntent.getBroadcast(
+        context, (channel.id + System.currentTimeMillis()).hashCode(), intent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    val alarm = context.getSystemService(AlarmManager::class.java)
+    alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + minutes * 60_000L, pending)
+}
+
+private fun openRecordings(context: Context) {
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video/*")
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
 }
