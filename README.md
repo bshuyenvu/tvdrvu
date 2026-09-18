@@ -1,5 +1,11 @@
 # TV Dr Vũ — Android
 
+## Cập nhật v3.3.1
+
+- Giữ màn hình luôn sáng khi kênh đang phát ở khung nhỏ, toàn màn hình hoặc Picture-in-Picture.
+- Timeout của Android không tự tắt màn hình trong lúc xem; người dùng vẫn có thể tắt bằng phím nguồn.
+- Khi dừng phát hoặc đóng trình phát, ứng dụng trả lại chế độ tự tắt màn hình bình thường.
+
 ## Cập nhật v3.3.0
 
 - Nút phụ đề trên trình phát: **CC TẮT → CC GỐC → 🌐 TIẾNG VIỆT**.

@@ -129,6 +129,9 @@ class MainActivity : ComponentActivity() {
     private var pendingOpenUrl by mutableStateOf<String?>(null)
     private var controller by mutableStateOf<MediaController?>(null)
     private var controllerFuture: ListenableFuture<MediaController>? = null
+    private val keepScreenOnListener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) = updateKeepScreenOn(player)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -151,6 +154,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        controller?.removeListener(keepScreenOnListener)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controllerFuture = null
         controller = null
@@ -185,8 +190,24 @@ class MainActivity : ComponentActivity() {
         future.addListener({
             controller = runCatching { future.get() }.getOrNull()
             if (controller == null) controllerFuture = null
-            else if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) setVideoEnabled(true)
+            else {
+                controller?.addListener(keepScreenOnListener)
+                controller?.let(::updateKeepScreenOn)
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) setVideoEnabled(true)
+            }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /**
+     * Giữ màn hình sáng ở mọi kích thước trình phát, kể cả Picture-in-Picture.
+     * FLAG_KEEP_SCREEN_ON chỉ chặn timeout tự động; phím nguồn vẫn tắt màn hình bình thường.
+     */
+    private fun updateKeepScreenOn(player: Player) {
+        val activelyPlaying = player.playWhenReady &&
+            player.playbackState != Player.STATE_IDLE &&
+            player.playbackState != Player.STATE_ENDED
+        if (activelyPlaying) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun setVideoEnabled(enabled: Boolean) {
