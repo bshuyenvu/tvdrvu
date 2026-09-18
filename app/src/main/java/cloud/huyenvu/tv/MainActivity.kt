@@ -34,6 +34,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -54,7 +55,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -113,11 +119,13 @@ private val PLAYLISTS = listOf(
     "Tiếng Việt" to "https://iptv-org.github.io/iptv/languages/vie.m3u"
 )
 private const val PREFS = "tv_dr_vu"
-private val DeepNavy = Color(0xFF050A12)
-private val SurfaceNavy = Color(0xFF0C1726)
-private val Teal = Color(0xFF2DD4BF)
-private val Cyan = Color(0xFF22D3EE)
-private val Muted = Color(0xFF94A3B8)
+private val DeepNavy = Color(0xFF050B14)
+private val SurfaceNavy = Color(0xFF0D1B2A)
+private val BrandGold = Color(0xFFFFB703)
+private val BrandCyan = Color(0xFF22D3EE)
+private val Teal = BrandCyan
+private val Cyan = BrandGold
+private val Muted = Color(0xFFA8B4C5)
 
 enum class ChannelTab { ALL, FAVORITES, RECENT }
 private enum class SubtitleMode { OFF, ORIGINAL, VIETNAMESE }
@@ -256,6 +264,8 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showSchedule by remember { mutableStateOf(false) }
     var showSources by remember { mutableStateOf(false) }
+    val appPrefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+    var showWelcome by remember { mutableStateOf(!appPrefs.getBoolean("welcome_seen_v1", false)) }
     var customUrls by remember { mutableStateOf(loadCustomPlaylists(context)) }
     val configuration = LocalConfiguration.current
     val recording by RecorderState.isRecording.collectAsState()
@@ -482,7 +492,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     Surface(Modifier.fillMaxSize(), color = Color.Transparent, contentColor = Color.White) {
     BoxWithConstraints(
         Modifier.fillMaxSize().background(
-            Brush.radialGradient(listOf(Color(0xFF103141), DeepNavy), radius = 1100f)
+            Brush.radialGradient(listOf(Color(0xFF123149), DeepNavy), radius = 1100f)
         ).systemBarsPadding()
     ) {
         val wide = maxWidth >= 850.dp
@@ -585,7 +595,64 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
             onDismiss = { showSources = false }
         )
     }
+    if (showWelcome) WelcomeDialog {
+        appPrefs.edit().putBoolean("welcome_seen_v1", true).apply()
+        showWelcome = false
     }
+    }
+}
+
+@Composable
+private fun WelcomeDialog(onDismiss: () -> Unit) {
+    val tips = listOf(
+        Icons.Default.LiveTv to "Chọn kênh trong danh sách để bắt đầu xem.",
+        Icons.Default.Fullscreen to "Bấm phóng to; trong toàn màn hình có thể khóa thao tác.",
+        Icons.Default.SwipeVertical to "Vuốt cạnh trái để chỉnh sáng, cạnh phải để chỉnh âm lượng.",
+        Icons.Default.Subtitles to "Nút CC chuyển giữa Tắt, phụ đề gốc và dịch tiếng Việt.",
+        Icons.Default.PictureInPictureAlt to "Cửa sổ nhỏ giúp tiếp tục xem khi dùng ứng dụng khác.",
+        Icons.Default.NotificationsActive to "Nhắc xem cho phép chọn số phút hoặc ngày giờ cụ thể."
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Image(
+                painter = painterResource(R.drawable.thevu_tv_icon),
+                contentDescription = null,
+                modifier = Modifier.size(72.dp).clip(RoundedCornerShape(20.dp))
+            )
+        },
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = BrandGold)) { append("TheVu") }
+                        withStyle(SpanStyle(color = BrandCyan)) { append("TV") }
+                    },
+                    fontWeight = FontWeight.ExtraBold, fontStyle = FontStyle.Italic, fontSize = 26.sp
+                )
+                Text("Hướng dẫn sử dụng nhanh", color = Muted, fontSize = 14.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                tips.forEach { (icon, text) ->
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(icon, null, tint = BrandCyan, modifier = Modifier.size(21.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(text, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(
+                containerColor = BrandCyan, contentColor = DeepNavy
+            )) { Text("BẮT ĐẦU XEM", fontWeight = FontWeight.ExtraBold) }
+        },
+        containerColor = SurfaceNavy,
+        titleContentColor = Color.White,
+        textContentColor = Color.White
+    )
 }
 
 @Composable
@@ -598,14 +665,21 @@ private fun AppHeader(
         Modifier.fillMaxWidth().height(70.dp).background(Color(0xDD07101D)).padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(14.dp))
-                .background(Brush.linearGradient(listOf(Teal, Cyan))),
-            contentAlignment = Alignment.Center
-        ) { Icon(Icons.Default.LiveTv, null, tint = Color(0xFF031313)) }
+        Image(
+            painter = painterResource(R.drawable.thevu_tv_icon),
+            contentDescription = "TheVu TV",
+            modifier = Modifier.size(46.dp).clip(RoundedCornerShape(14.dp))
+        )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("TV Dr Vũ", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = BrandGold)) { append("TheVu") }
+                    withStyle(SpanStyle(color = BrandCyan)) { append("TV") }
+                },
+                fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontStyle = FontStyle.Italic,
+                letterSpacing = (-0.8).sp
+            )
             Text("TV • Thể thao • Phim • Tin tức", color = Muted, fontSize = 12.sp)
         }
         IconButton(onClick = onRecordings) { Icon(Icons.Default.VideoLibrary, "Bản ghi", tint = Teal) }
@@ -675,14 +749,14 @@ private fun PlayerPane(
                     Spacer(Modifier.width(8.dp))
                     Text("ĐANG XEM", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
                 }
-                Text(selected?.name ?: "TV Dr Vũ", fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
+                Text(selected?.name ?: "TheVu TV", fontSize = 25.sp, fontWeight = FontWeight.ExtraBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(selected?.group ?: "Danh sách kênh Việt Nam", color = Muted, fontSize = 14.sp)
                 if (nowPlaying != null) Text(nowPlaying, color = Teal, fontSize = 13.sp, maxLines = 2,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
             FilledIconButton(onClick = { selected?.id?.let(onFavorite) },
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (favorite) Color(0x332DD4BF) else Color(0xFF142033))) {
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (favorite) Color(0x3322D3EE) else Color(0xFF142033))) {
                 Icon(if (favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "Yêu thích", tint = if (favorite) Teal else Muted)
             }
         }
@@ -727,7 +801,7 @@ private fun PlayerPane(
             Spacer(Modifier.width(9.dp))
             Text(if (recording) "DỪNG VÀ LƯU BẢN GHI" else "GHI CHƯƠNG TRÌNH", fontWeight = FontWeight.ExtraBold)
         }
-        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/TV Dr Vũ."
+        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/TheVu TV."
             else "Bản ghi chỉ dùng cá nhân và phụ thuộc quyền truy cập của từng luồng phát.",
             color = Color(0xFF64748B), fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
     }
@@ -1171,7 +1245,7 @@ private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: Str
                                     val live = nowMs >= p.start && nowMs < p.stop
                                     Row(
                                         Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(RoundedCornerShape(12.dp))
-                                            .background(if (live) Color(0x222DD4BF) else Color.Transparent).padding(10.dp)
+                                            .background(if (live) Color(0x2222D3EE) else Color.Transparent).padding(10.dp)
                                     ) {
                                         Text(formatTime(p.start), color = if (live) Teal else Muted,
                                             fontWeight = FontWeight.Bold, modifier = Modifier.width(56.dp))
@@ -1354,7 +1428,7 @@ private fun ChannelPane(
 private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(RoundedCornerShape(14.dp))
-            .background(if (selected) Color(0x222DD4BF) else Color.Transparent)
+            .background(if (selected) Color(0x2222D3EE) else Color.Transparent)
             .clickable(onClick = onClick).focusable().padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

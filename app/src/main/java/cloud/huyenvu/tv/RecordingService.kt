@@ -93,7 +93,7 @@ class RecordingService : Service() {
 
     private fun finishRecording() {
         active = false
-        updateNotification("TV Dr Vũ", "Đang hoàn tất và lưu bản ghi…")
+        updateNotification("TheVu TV", "Đang hoàn tất và lưu bản ghi…")
     }
 
     private suspend fun recordHls(initialUrl: String, output: OutputStream, progress: (Int) -> Unit) {
@@ -170,7 +170,7 @@ class RecordingService : Service() {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp2t")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/TV Dr Vũ")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/TheVu TV")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)

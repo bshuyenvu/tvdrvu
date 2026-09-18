@@ -1,4 +1,10 @@
-# TV Dr Vũ — Android
+# TheVu TV — Android
+
+## Cập nhật v3.4.0
+
+- Đổi tên ứng dụng thành **TheVu TV** và bổ sung logo chữ liền mạch hai màu.
+- Đồng bộ giao diện xanh đen, cyan và vàng cam theo nhận diện mới.
+- Thêm hướng dẫn sử dụng chỉ hiển thị một lần sau lần cài đặt đầu tiên.
 
 ## Cập nhật v3.3.1
 
