@@ -16,8 +16,8 @@ android {
         // Giữ targetSdk 35 có chủ ý: targetSdk 36 bỏ qua requestedOrientation trên máy tính bảng/màn hình gập,
         // làm hỏng chế độ toàn màn hình xoay ngang.
         targetSdk = 35
-        versionCode = 12
-        versionName = "3.2.0"
+        versionCode = 13
+        versionName = "3.3.0"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -74,5 +74,7 @@ dependencies {
     implementation("com.google.guava:guava:33.4.8-android")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("com.google.mlkit:language-id:17.0.6")
+    implementation("com.google.mlkit:translate:17.0.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
