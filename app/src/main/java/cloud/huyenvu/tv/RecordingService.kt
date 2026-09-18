@@ -56,7 +56,7 @@ class RecordingService : Service() {
                     intent.getStringExtra(EXTRA_NAME).orEmpty()
                 )
             }
-            ACTION_STOP -> finishRecording()
+            ACTION_STOP -> if (recordingJob == null) stopSelf() else finishRecording()
         }
         return START_NOT_STICKY
     }
@@ -147,7 +147,7 @@ class RecordingService : Service() {
     private fun getText(url: String): String = request(url).toString(Charsets.UTF_8)
     private fun getBytes(url: String): ByteArray = request(url)
     private fun request(url: String): ByteArray {
-        val req = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/1.1").build()
+        val req = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/${BuildConfig.VERSION_NAME}").build()
         return client.newCall(req).execute().use { response ->
             check(response.isSuccessful) { "HTTP ${response.code}" }
             response.body?.bytes() ?: error("Dữ liệu trống")

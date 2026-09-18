@@ -15,9 +15,44 @@ jobs:
           cache: gradle
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
-      - run: gradle assembleDebug
+          gradle-version: "8.13"
+
+      # Ký bằng khóa cố định nếu đã khai báo Secrets (xem README). Không có Secrets vẫn build bình thường.
+      - name: Chuẩn bị khóa ký
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/tvdrvu.jks"
+            {
+              echo "KEYSTORE_PATH=$RUNNER_TEMP/tvdrvu.jks"
+              echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "KEY_ALIAS=$KEY_ALIAS"
+              echo "KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "Đã nạp khóa ký cố định."
+          else
+            echo "Chưa có KEYSTORE_BASE64 -> dùng khóa debug ngẫu nhiên (mỗi lần build sẽ khác chữ ký)."
+          fi
+
+      - name: Build debug
+        run: gradle assembleDebug
+
+      # Bản release nhẹ hơn và mượt hơn (R8 + thu gọn tài nguyên). Lỗi ở bước này không làm mất bản debug.
+      - name: Build release
+        id: release
+        continue-on-error: true
+        run: gradle assembleRelease
+
       - uses: actions/upload-artifact@v4
         with:
           name: TV-Dr-Vu-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        if: steps.release.outcome == 'success'
+        with:
+          name: TV-Dr-Vu-release
+          path: app/build/outputs/apk/release/app-release.apk

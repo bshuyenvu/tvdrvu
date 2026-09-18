@@ -1,12 +1,12 @@
 package cloud.huyenvu.tv
 
 import android.Manifest
-import android.app.AlarmManager
 import android.app.DatePickerDialog
-import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.TimePickerDialog
+import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -54,11 +54,18 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.C
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import com.google.common.util.concurrent.ListenableFuture
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -68,6 +75,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
+import java.util.Calendar
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 
 private val PLAYLISTS = listOf(
     "Việt Nam" to "https://iptv-org.github.io/iptv/countries/vn.m3u",
@@ -77,6 +89,7 @@ private val PLAYLISTS = listOf(
     "Tin tức" to "https://iptv-org.github.io/iptv/categories/news.m3u",
     "Thiếu nhi" to "https://iptv-org.github.io/iptv/categories/kids.m3u"
 )
+private const val PREFS = "tv_dr_vu"
 private val DeepNavy = Color(0xFF050A12)
 private val SurfaceNavy = Color(0xFF0C1726)
 private val Teal = Color(0xFF2DD4BF)
@@ -87,18 +100,76 @@ data class Channel(val id: String, val name: String, val logo: String, val group
 enum class ChannelTab { ALL, FAVORITES, RECENT }
 
 class MainActivity : ComponentActivity() {
+    companion object { const val EXTRA_OPEN_URL = "open_url" }
+
     private var pipMode by mutableStateOf(false)
+    private var pendingOpenUrl by mutableStateOf<String?>(null)
+    private var controller by mutableStateOf<MediaController?>(null)
+    private var controllerFuture: ListenableFuture<MediaController>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
-        setContent { TVDrVuTheme { TVDrVuApp(pipMode) } }
+        pendingOpenUrl = intent?.getStringExtra(EXTRA_OPEN_URL)
+        setContent { TVDrVuTheme { TVDrVuApp(controller, pipMode, pendingOpenUrl) { pendingOpenUrl = null } } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        connectController()
+        setVideoEnabled(true)
+    }
+
+    override fun onStop() {
+        // Ở nền chỉ nghe tiếng: tắt luồng hình để tiết kiệm dữ liệu và pin
+        if (!isInPictureInPictureMode) setVideoEnabled(false)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+        controllerFuture = null
+        controller = null
+        super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingOpenUrl = intent.getStringExtra(EXTRA_OPEN_URL)
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        val c = controller ?: return
+        val auto = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("pip_auto", false)
+        if (auto && !pipMode && c.isPlaying && c.videoSize.width > 0) enterPip(this)
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode)
         pipMode = isInPictureInPictureMode
+        // Người dùng đóng cửa sổ nhỏ (activity đã dừng) -> dừng phát thay vì tiếp tục ở nền
+        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.CREATED) controller?.pause()
+    }
+
+    private fun connectController() {
+        if (controller != null || controllerFuture != null) return
+        val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
+        val future = MediaController.Builder(this, token).buildAsync()
+        controllerFuture = future
+        future.addListener({
+            controller = runCatching { future.get() }.getOrNull()
+            if (controller == null) controllerFuture = null
+            else if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) setVideoEnabled(true)
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun setVideoEnabled(enabled: Boolean) {
+        val c = controller ?: return
+        c.trackSelectionParameters = c.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled).build()
     }
 }
 
@@ -113,7 +184,7 @@ private fun TVDrVuTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun TVDrVuApp(pipMode: Boolean) {
+private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpenHandled: () -> Unit) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     val configuration = LocalConfiguration.current
@@ -125,27 +196,50 @@ private fun TVDrVuApp(pipMode: Boolean) {
     var tab by remember { mutableStateOf(ChannelTab.ALL) }
     var loading by remember { mutableStateOf(true) }
     var message by remember { mutableStateOf<String?>(null) }
+    var canRetry by remember { mutableStateOf(false) }
     var favorites by remember { mutableStateOf(loadIds(context, "favorites")) }
-    var recent by remember { mutableStateOf(loadIds(context, "recent")) }
+    var recent by remember { mutableStateOf(loadOrdered(context, "recent")) }
     var dataSaver by remember { mutableStateOf(context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).getBoolean("data_saver", false)) }
+    var pipAuto by remember { mutableStateOf(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("pip_auto", false)) }
     var sleepMinutes by remember { mutableStateOf<Int?>(null) }
     var sleepKey by remember { mutableIntStateOf(0) }
     var screenLocked by remember { mutableStateOf(false) }
     val recording by RecorderState.isRecording.collectAsState()
+    val recorderMessage by RecorderState.lastMessage.collectAsState()
+    val playerRef by rememberUpdatedState(player)
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    fun showMessage(text: String, retry: Boolean = false) { message = text; canRetry = retry }
+
+    suspend fun reload() {
+        runCatching { loadChannels(context) }
+            .onSuccess { list -> channels = list; selected = pickInitial(context, list, selected) }
+            .onFailure { showMessage("Chưa tải được danh sách kênh. Hãy kiểm tra kết nối mạng.", retry = true) }
+        loading = false
+    }
 
     LaunchedEffect(sleepKey, sleepMinutes) {
         val minutes = sleepMinutes ?: return@LaunchedEffect
-        kotlinx.coroutines.delay(minutes * 60_000L)
+        delay(minutes * 60_000L)
+        playerRef?.let { it.stop(); it.clearMediaItems() }
         selected = null
         sleepMinutes = null
-        message = "Đã dừng phát theo hẹn giờ."
+        showMessage("Đã dừng phát theo hẹn giờ.")
     }
 
-    LaunchedEffect(Unit) {
-        runCatching { loadChannels() }
-            .onSuccess { list -> channels = list; selected = list.firstOrNull() }
-            .onFailure { message = "Chưa tải được danh sách kênh. Hãy kiểm tra kết nối mạng." }
-        loading = false
+    LaunchedEffect(Unit) { reload() }
+
+    // Thông báo kết quả ghi hình (trước đây RecorderState.lastMessage không bao giờ hiển thị)
+    LaunchedEffect(recorderMessage) {
+        recorderMessage?.let { showMessage(it); RecorderState.lastMessage.value = null }
+    }
+
+    // Snackbar tự tắt (trước đây nằm mãi trên màn hình)
+    LaunchedEffect(message, canRetry) {
+        if (message != null) {
+            delay(if (canRetry) 10_000L else 4_000L)
+            message = null
+        }
     }
 
     val visible by remember(channels, query, category, tab, favorites, recent) {
@@ -167,13 +261,50 @@ private fun TVDrVuApp(pipMode: Boolean) {
 
     fun choose(channel: Channel) {
         selected = channel
-        recent = (listOf(channel.id) + recent.filterNot { it == channel.id }).take(20).toSet()
-        saveIds(context, "recent", recent)
+        recent = (listOf(channel.id) + recent.filterNot { it == channel.id }).take(20)
+        saveOrdered(context, "recent", recent)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("last_channel_url", channel.url).apply()
+    }
+
+    // Đồng bộ kênh đang chọn -> trình phát dùng chung (chỉ nạp lại khi khác kênh đang phát)
+    LaunchedEffect(player, selected) {
+        val p = player ?: return@LaunchedEffect
+        val channel = selected ?: return@LaunchedEffect
+        if (p.currentMediaItem?.mediaId != channel.url) {
+            p.setMediaItem(channel.toMediaItem()); p.prepare(); p.play()
+        }
+    }
+
+    LaunchedEffect(player, dataSaver) {
+        val p = player ?: return@LaunchedEffect
+        val params = p.trackSelectionParameters.buildUpon()
+        if (dataSaver) params.setMaxVideoBitrate(1_200_000).setMaxVideoSizeSd()
+        else params.clearVideoSizeConstraints().setMaxVideoBitrate(Int.MAX_VALUE)
+        p.trackSelectionParameters = params.build()
+    }
+
+    // Xin quyền thông báo một lần để hiện điều khiển phát nền
+    LaunchedEffect(Unit) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 && !prefs.getBoolean("asked_notifications", false) &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            prefs.edit().putBoolean("asked_notifications", true).apply()
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // Bấm thông báo nhắc lịch -> mở đúng kênh đã hẹn
+    LaunchedEffect(openUrl, channels) {
+        val url = openUrl ?: return@LaunchedEffect
+        val target = channels.firstOrNull { it.url == url } ?: return@LaunchedEffect
+        choose(target)
+        onOpenHandled()
     }
 
     if (pipMode) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            selected?.let { VideoPlayer(it.url, dataSaver, controls = false) }
+            selected?.let { VideoPlayer(player, controls = false) }
         }
         return
     }
@@ -202,7 +333,7 @@ private fun TVDrVuApp(pipMode: Boolean) {
         }
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             VideoPlayer(
-                landscapeChannel.url, dataSaver, controls = !screenLocked, landscapeHost = true,
+                player, controls = !screenLocked, landscapeHost = true,
                 locked = screenLocked, onToggleLock = { screenLocked = !screenLocked }
             )
         }
@@ -220,6 +351,11 @@ private fun TVDrVuApp(pipMode: Boolean) {
             AppHeader(
                 sleepMinutes = sleepMinutes,
                 dataSaver = dataSaver,
+                pipAuto = pipAuto,
+                onPipAuto = {
+                    pipAuto = !pipAuto
+                    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("pip_auto", pipAuto).apply()
+                },
                 onSleep = { minutes -> sleepMinutes = minutes; sleepKey++ },
                 onDataSaver = {
                     dataSaver = !dataSaver
@@ -229,14 +365,14 @@ private fun TVDrVuApp(pipMode: Boolean) {
             )
             if (wide) {
                 Row(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
+                    PlayerPane(selected, recording, player, selected?.id in favorites, { id ->
                         favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
                     }, { toggleRecording(context, selected, recording) },
                         { enterPip(context) }, { minutes -> selected?.let { channel ->
                             if (minutes > 0) {
                                 scheduleReminder(context, channel, minutes)
-                                message = "Đã hẹn nhắc sau $minutes phút."
-                            } else pickReminderDateTime(context, channel) { text -> message = text }
+                                showMessage("Đã hẹn nhắc sau $minutes phút.")
+                            } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
                         } }, Modifier.weight(1.65f))
                     ChannelPane(visible, selected, query, category, tab, loading,
                         onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
@@ -248,20 +384,20 @@ private fun TVDrVuApp(pipMode: Boolean) {
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp).aspectRatio(16 / 9f),
                         shape = RoundedCornerShape(18.dp), color = Color.Black, shadowElevation = 16.dp
                     ) {
-                        selected?.let { VideoPlayer(it.url, dataSaver) } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        selected?.let { VideoPlayer(player) } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text("Chọn một kênh để bắt đầu", color = Muted)
                         }
                     }
                     LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
                         item {
-                        PlayerPane(selected, recording, dataSaver, selected?.id in favorites, { id ->
+                        PlayerPane(selected, recording, player, selected?.id in favorites, { id ->
                             favorites = toggleId(favorites, id); saveIds(context, "favorites", favorites)
                         }, { toggleRecording(context, selected, recording) },
                             { enterPip(context) }, { minutes -> selected?.let { channel ->
                                 if (minutes > 0) {
                                     scheduleReminder(context, channel, minutes)
-                                    message = "Đã hẹn nhắc sau $minutes phút."
-                                } else pickReminderDateTime(context, channel) { text -> message = text }
+                                    showMessage("Đã hẹn nhắc sau $minutes phút.")
+                                } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
                             } }, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), showVideo = false)
                         }
                         item {
@@ -273,17 +409,17 @@ private fun TVDrVuApp(pipMode: Boolean) {
                 }
             }
         }
-        message?.let {
-            Snackbar(Modifier.align(Alignment.BottomCenter).padding(20.dp), action = {
-                TextButton(onClick = {
-                    message = null; loading = true
-                    scope.launch {
-                        runCatching { loadChannels() }.onSuccess { channels = it; selected = it.firstOrNull() }
-                            .onFailure { message = "Vẫn chưa kết nối được nguồn kênh." }
-                        loading = false
-                    }
-                }) { Text("THỬ LẠI") }
-            }) { Text(it) }
+        message?.let { text ->
+            if (canRetry) {
+                Snackbar(Modifier.align(Alignment.BottomCenter).padding(20.dp), action = {
+                    TextButton(onClick = {
+                        message = null; loading = true
+                        scope.launch { reload() }
+                    }) { Text("THỬ LẠI") }
+                }) { Text(text) }
+            } else {
+                Snackbar(Modifier.align(Alignment.BottomCenter).padding(20.dp)) { Text(text) }
+            }
         }
     }
     }
@@ -291,7 +427,7 @@ private fun TVDrVuApp(pipMode: Boolean) {
 
 @Composable
 private fun AppHeader(
-    sleepMinutes: Int?, dataSaver: Boolean, onSleep: (Int?) -> Unit,
+    sleepMinutes: Int?, dataSaver: Boolean, pipAuto: Boolean, onPipAuto: () -> Unit, onSleep: (Int?) -> Unit,
     onDataSaver: () -> Unit, onRecordings: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -318,6 +454,11 @@ private fun AppHeader(
                     leadingIcon = { Icon(Icons.Default.DataSaverOn, null) },
                     onClick = { onDataSaver(); menu = false }
                 )
+                DropdownMenuItem(
+                    text = { Text(if (pipAuto) "Tắt tự mở cửa sổ nhỏ khi thoát app" else "Tự mở cửa sổ nhỏ khi thoát app") },
+                    leadingIcon = { Icon(Icons.Default.PictureInPictureAlt, null) },
+                    onClick = { onPipAuto(); menu = false }
+                )
                 listOf(15, 30, 60, 90).forEach { minutes ->
                     DropdownMenuItem(
                         text = { Text("Hẹn tắt sau $minutes phút") },
@@ -337,7 +478,7 @@ private fun AppHeader(
 
 @Composable
 private fun PlayerPane(
-    selected: Channel?, recording: Boolean, dataSaver: Boolean, favorite: Boolean, onFavorite: (String) -> Unit,
+    selected: Channel?, recording: Boolean, player: Player?, favorite: Boolean, onFavorite: (String) -> Unit,
     onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier,
     showVideo: Boolean = true
 ) {
@@ -355,7 +496,7 @@ private fun PlayerPane(
                         Spacer(Modifier.height(10.dp)); Text("Chọn một kênh để bắt đầu", color = Muted)
                     }
                 }
-            } else VideoPlayer(selected.url, dataSaver)
+            } else VideoPlayer(player)
         }
         Spacer(Modifier.height(16.dp))
         Row(verticalAlignment = Alignment.Top) {
@@ -416,36 +557,37 @@ private fun PlayerPane(
 @OptIn(UnstableApi::class)
 @Composable
 private fun VideoPlayer(
-    url: String, dataSaver: Boolean, controls: Boolean = true, landscapeHost: Boolean = false,
+    player: Player?, controls: Boolean = true, landscapeHost: Boolean = false,
     locked: Boolean = false, onToggleLock: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
+    val target = player
     var isFullscreen by remember { mutableStateOf(false) }
-    var playbackError by remember { mutableStateOf<String?>(null) }
-    var buffering by remember { mutableStateOf(true) }
-    val player = remember(url, dataSaver) {
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        val trackSelector = DefaultTrackSelector(context).apply {
-            if (dataSaver) setParameters(buildUponParameters().setMaxVideoBitrate(1_200_000).setMaxVideoSizeSd())
-        }
-        ExoPlayer.Builder(context, renderers).setTrackSelector(trackSelector).build().apply {
-            setMediaItem(MediaItem.fromUri(url)); prepare(); playWhenReady = true
-        }
+    var playbackError by remember(target) {
+        mutableStateOf<String?>(if (target?.playerError != null) "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác." else null)
     }
-    DisposableEffect(player) {
-        val listener = object : androidx.media3.common.Player.Listener {
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+    var buffering by remember(target) { mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING) }
+
+    DisposableEffect(target) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                // Lỗi "behind live window" do dịch vụ phát tự phục hồi, không báo lỗi cho người xem
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) return
                 buffering = false
                 playbackError = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
             }
             override fun onPlaybackStateChanged(state: Int) {
-                buffering = state == androidx.media3.common.Player.STATE_BUFFERING
-                if (state == androidx.media3.common.Player.STATE_READY) playbackError = null
+                buffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_READY) playbackError = null
+            }
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                playbackError = null
+                buffering = true
             }
         }
-        player.addListener(listener)
-        onDispose { player.removeListener(listener); player.release() }
+        target?.addListener(listener)
+        onDispose { target?.removeListener(listener) }
     }
 
     fun setFullscreen(enabled: Boolean) {
@@ -470,7 +612,7 @@ private fun VideoPlayer(
             AndroidView(
                 factory = {
                     (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
-                        this.player = player
+                        this.player = target
                         useController = controls
                         if (controls) setFullscreenButtonClickListener { enabled ->
                             if (landscapeHost && !enabled) {
@@ -479,7 +621,9 @@ private fun VideoPlayer(
                         }
                     }
                 },
-                update = { it.player = player; it.useController = controls },
+                update = { it.player = target; it.useController = controls },
+                // Nhiều PlayerView có thể cùng gắn một trình phát: view bị gỡ phải nhả trình phát ra
+                onRelease = { it.player = null },
                 modifier = Modifier.fillMaxSize()
             )
             if (buffering) CircularProgressIndicator(
@@ -493,7 +637,10 @@ private fun VideoPlayer(
                 ) {
                     Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(it, fontSize = 13.sp)
-                        TextButton(onClick = { playbackError = null; buffering = true; player.prepare(); player.play() }) {
+                        TextButton(onClick = {
+                            playbackError = null; buffering = true
+                            target?.let { p -> p.prepare(); p.play() }
+                        }) {
                             Text("THỬ LẠI", color = Color.White)
                         }
                     }
@@ -536,6 +683,17 @@ private fun VideoPlayer(
         }
     }
 }
+
+private fun Channel.toMediaItem(): MediaItem = MediaItem.Builder()
+    .setMediaId(url)
+    .setUri(url)
+    .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(url)).build())
+    .setMediaMetadata(
+        MediaMetadata.Builder().setTitle(name).setArtist(group)
+            .apply { if (logo.isNotBlank()) setArtworkUri(Uri.parse(logo)) }
+            .build()
+    )
+    .build()
 
 @Composable
 private fun ChannelPane(
@@ -611,47 +769,94 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit)
     }
 }
 
-private suspend fun loadChannels(): List<Channel> = withContext(Dispatchers.IO) {
-    val client = OkHttpClient()
-    coroutineScope {
+private suspend fun loadChannels(context: Context): List<Channel> = withContext(Dispatchers.IO) {
+    val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
+    val list = coroutineScope {
         PLAYLISTS.map { (category, url) ->
             async {
-                runCatching {
-                    val request = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/2.1").build()
+                // Có mạng: tải mới và lưu cache. Mất mạng/lỗi nguồn: dùng bản cache gần nhất.
+                val cache = File(context.cacheDir, "playlist-${category.hashCode()}.m3u")
+                val text = runCatching {
+                    val request = Request.Builder().url(url)
+                        .header("User-Agent", "TV-Dr-Vu-Android/${BuildConfig.VERSION_NAME}").build()
                     client.newCall(request).execute().use { response ->
                         check(response.isSuccessful)
-                        parseM3u(response.body?.string().orEmpty(), category)
+                        response.body?.string().orEmpty()
                     }
-                }.getOrDefault(emptyList())
+                }.getOrNull()?.takeIf { it.contains("#EXTINF") }?.also { runCatching { cache.writeText(it) } }
+                    ?: runCatching { if (cache.exists()) cache.readText() else null }.getOrNull()
+                text?.let { parseM3u(it, category) }.orEmpty()
             }
         }.awaitAll().flatten()
             .filterNot { it.name.contains("geo-blocked", true) || it.name.contains("[geo", true) }
             .distinctBy { it.url }
     }
+    check(list.isNotEmpty()) { "Không có kênh nào" }
+    list
 }
 
-private fun parseM3u(text: String, category: String): List<Channel> {
-    val lines = text.lineSequence().toList()
-    val result = mutableListOf<Channel>()
-    val attr = { line: String, name: String -> Regex("""$name="([^"]*)"""", RegexOption.IGNORE_CASE).find(line)?.groupValues?.get(1).orEmpty() }
-    lines.forEachIndexed { index, line ->
-        if (!line.startsWith("#EXTINF")) return@forEachIndexed
-        val url = lines.drop(index + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim().orEmpty()
-        if (!url.startsWith("http")) return@forEachIndexed
-        val name = line.substringAfter(",", attr(line, "tvg-name")).trim()
-        val id = attr(line, "tvg-id").ifBlank { "$name-$index" }
-        val rawGroup = attr(line, "group-title")
-        val group = rawGroup.takeUnless { it.isBlank() || it.equals("undefined", true) } ?: "Việt Nam"
-        result += Channel(id, name, attr(line, "tvg-logo"), group, url, category)
+private val M3U_ATTR = Regex("""([A-Za-z0-9_-]+)="([^"]*)"""")
+
+private fun extinfName(info: String): String {
+    var inQuote = false
+    for (i in info.indices) {
+        val c = info[i]
+        if (c == '"') inQuote = !inQuote
+        else if (c == ',' && !inQuote) return info.substring(i + 1).trim()
     }
-    return result.distinctBy { it.url }
+    return ""
+}
+
+// Một lượt quét O(n); dấu phẩy trong group-title không làm hỏng tên kênh
+private fun parseM3u(text: String, category: String): List<Channel> {
+    val result = LinkedHashMap<String, Channel>()
+    var pending: String? = null
+    for (raw in text.lineSequence()) {
+        val line = raw.trim()
+        if (line.startsWith("#EXTINF")) {
+            pending = line
+            continue
+        }
+        if (line.isEmpty() || line.startsWith("#")) continue
+        val info = pending
+        pending = null
+        if (info == null || !line.startsWith("http") || result.containsKey(line)) continue
+        val attrs = M3U_ATTR.findAll(info).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
+        val name = extinfName(info).ifBlank { attrs["tvg-name"].orEmpty() }
+        if (name.isBlank()) continue
+        val rawGroup = attrs["group-title"].orEmpty()
+        val group = rawGroup.takeUnless { it.isBlank() || it.equals("undefined", true) } ?: "Việt Nam"
+        val id = attrs["tvg-id"].orEmpty().ifBlank { name }
+        result[line] = Channel(id, name, attrs["tvg-logo"].orEmpty(), group, line, category)
+    }
+    return result.values.toList()
+}
+
+private fun pickInitial(context: Context, list: List<Channel>, current: Channel?): Channel? {
+    current?.let { c -> list.firstOrNull { it.url == c.url }?.let { return it } }
+    val last = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("last_channel_url", null)
+    return list.firstOrNull { it.url == last } ?: list.firstOrNull()
 }
 
 private fun loadIds(context: Context, key: String): Set<String> =
-    context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).getStringSet(key, emptySet()) ?: emptySet()
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(key, emptySet()) ?: emptySet()
 
 private fun saveIds(context: Context, key: String, ids: Set<String>) {
-    context.getSharedPreferences("tv_dr_vu", Context.MODE_PRIVATE).edit().putStringSet(key, ids).apply()
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putStringSet(key, ids).apply()
+}
+
+// StringSet của SharedPreferences không giữ thứ tự -> lưu danh sách "Gần đây" dạng chuỗi có thứ tự
+private fun loadOrdered(context: Context, key: String): List<String> {
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val raw = prefs.getString("${key}_ordered", null)
+    return if (raw != null) raw.split('\n').filter { it.isNotBlank() }
+    else prefs.getStringSet(key, emptySet()).orEmpty().toList()
+}
+
+private fun saveOrdered(context: Context, key: String, ids: List<String>) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        .putString("${key}_ordered", ids.joinToString("\n")).apply()
 }
 
 private fun toggleId(ids: Set<String>, id: String) = if (id in ids) ids - id else ids + id
@@ -693,13 +898,7 @@ private fun scheduleReminderAt(context: Context, channel: Channel, triggerAt: Lo
             ActivityCompat.requestPermissions(it, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1102)
         }
     }
-    val intent = Intent(context, ReminderReceiver::class.java).putExtra("channel_name", channel.name)
-    val pending = PendingIntent.getBroadcast(
-        context, (channel.id + System.currentTimeMillis()).hashCode(), intent,
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-    )
-    val alarm = context.getSystemService(AlarmManager::class.java)
-    alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+    Reminders.schedule(context, channel.name, channel.url, triggerAt)
 }
 
 private fun pickReminderDateTime(context: Context, channel: Channel, onResult: (String) -> Unit) {
