@@ -2,7 +2,7 @@ name: Android Build
 on:
   workflow_dispatch:
   push:
-    branches: [main, feature/subtitle-translation-v3.3.0]
+    branches: [main]
 jobs:
   build:
     runs-on: ubuntu-latest
