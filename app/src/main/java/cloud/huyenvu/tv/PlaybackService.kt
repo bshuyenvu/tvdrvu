@@ -4,6 +4,8 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -28,6 +30,9 @@ import com.google.common.util.concurrent.ListenableFuture
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var retryCount = 0
+    private var recoveryToken = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -35,8 +40,8 @@ class PlaybackService : MediaSessionService() {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(8_000)
         val player = ExoPlayer.Builder(this, DefaultRenderersFactory(this).setEnableDecoderFallback(true))
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(http))
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
@@ -45,14 +50,25 @@ class PlaybackService : MediaSessionService() {
             .build()
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                // HLS trực tiếp: bị tụt khỏi cửa sổ live thì nhảy về điểm phát hiện tại
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                     player.seekToDefaultPosition()
                     player.prepare()
-                } else {
-                    // Luồng hỏng: tự chuyển sang nguồn dự phòng kế tiếp của cùng kênh (kể cả khi app ở nền)
-                    player.tryNextSource()
+                    player.play()
+                    return
                 }
+                recoverOrFallback(player)
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) {
+                    retryCount = 0
+                    recoveryToken++
+                }
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                retryCount = 0
+                recoveryToken++
             }
         })
         val openApp = PendingIntent.getActivity(
@@ -64,6 +80,26 @@ class PlaybackService : MediaSessionService() {
             .setCallback(ResolveUriCallback)
             .setSessionActivity(openApp)
             .build()
+    }
+
+    /**
+     * Lỗi mạng/HTTP tạm thời: thử lại cùng nguồn tối đa 2 lần. Nếu vẫn lỗi, tự chuyển nguồn dự phòng.
+     */
+    private fun recoverOrFallback(player: ExoPlayer) {
+        val token = ++recoveryToken
+        if (retryCount < 2) {
+            retryCount++
+            val delayMs = if (retryCount == 1) 900L else 2_200L
+            handler.postDelayed({
+                if (token != recoveryToken) return@postDelayed
+                player.prepare()
+                player.play()
+            }, delayMs)
+            return
+        }
+
+        retryCount = 0
+        if (player.tryNextSource()) recoveryToken++
     }
 
     /** Chỉ nạp một nguồn mỗi lần (không nạp cả danh sách) để không tải song song nhiều luồng HLS. */
@@ -98,6 +134,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
         session?.let {
             it.player.release()
             it.release()

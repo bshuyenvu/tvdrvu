@@ -1,5 +1,16 @@
 # TV Dr Vũ — Android
 
+## Cập nhật v3.2.0
+
+- Lịch phát sóng 3 ngày: **Hôm qua • Hôm nay • Ngày mai**.
+- Có nút **PHÁT LẠI** cho chương trình đã phát nếu nguồn M3U có khai báo `catchup-source` hợp lệ.
+- Luồng lỗi được tự thử lại tối đa 2 lần rồi tự chuyển sang nguồn dự phòng kế tiếp.
+- Không hiện ngay bảng lỗi đỏ trong lúc trình phát còn đang tự phục hồi.
+- Nút **THỬ LẠI** khởi động lại từ nguồn chính.
+- Timeout nguồn chết được rút ngắn để chuyển dự phòng nhanh hơn.
+
+
+
 Ứng dụng Android gốc dùng Jetpack Compose và Media3 ExoPlayer.
 
 ## Tính năng

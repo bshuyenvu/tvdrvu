@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.Calendar
 
 data class Program(val start: Long, val stop: Long, val title: String, val desc: String)
 
@@ -32,7 +33,7 @@ object Epg {
         val id = EpgMatch.resolve(map, EpgMatch.candidates(channel.name, channel.id))
             ?: return@withContext emptyList()
         val now = System.currentTimeMillis()
-        synchronized(cache) { cache[id] }?.takeIf { now - it.first < PROGRAM_TTL }?.let { return@withContext it.second }
+        synchronized(cache) { cache[id] }?.takeIf { now - it.first < PROGRAM_TTL }?.let { return@withContext threeDayWindow(it.second) }
         try {
             val items = JSONObject(get("$BASE/schedule/$id")).optJSONArray("items")
             val list = ArrayList<Program>()
@@ -43,11 +44,27 @@ object Epg {
             }
             list.sortBy { it.start }
             synchronized(cache) { cache[id] = now to list }
-            list
+            threeDayWindow(list)
         } catch (e: Exception) {
             // Mất mạng: vẫn hiển thị bản cũ nếu có
-            synchronized(cache) { cache[id] }?.second ?: throw IOException("Không tải được lịch phát sóng", e)
+            synchronized(cache) { cache[id] }?.second?.let { threeDayWindow(it) }
+                ?: throw IOException("Không tải được lịch phát sóng", e)
         }
+    }
+
+    /** Hiển thị ba ngày: hôm qua, hôm nay và ngày mai. */
+    private fun threeDayWindow(items: List<Program>): List<Program> {
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+            add(Calendar.DATE, -1)
+        }
+        val from = cal.timeInMillis
+        cal.add(Calendar.DATE, 3)
+        val to = cal.timeInMillis
+        return items.filter { it.stop > from && it.start < to }.sortedBy { it.start }
     }
 
     private fun loadMap(context: Context): Map<String, String> {

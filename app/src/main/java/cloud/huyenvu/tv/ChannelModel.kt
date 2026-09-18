@@ -3,7 +3,39 @@ package cloud.huyenvu.tv
 import java.text.Normalizer
 
 /** Một luồng phát của kênh. note: chất lượng và cờ chặn vùng, ví dụ "1080p · Chặn vùng". */
-data class Source(val url: String, val note: String)
+data class Source(
+    val url: String,
+    val note: String,
+    val catchupSource: String? = null,
+    val catchupDays: Int = 0
+) {
+    /** Tạo URL phát lại theo chuẩn catchup-source phổ biến của M3U/IPTV nếu nguồn có khai báo. */
+    fun replayUrl(program: Program): String? {
+        val template = catchupSource?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val now = System.currentTimeMillis()
+        if (program.stop >= now) return null
+        if (catchupDays > 0 && now - program.start > catchupDays * 86_400_000L) return null
+
+        val startSec = program.start / 1000L
+        val durationSec = ((program.stop - program.start) / 1000L).coerceAtLeast(1L)
+        val expanded = template
+            .replace("{utc}", startSec.toString())
+            .replace("{lutc}", startSec.toString())
+            .replace("{start}", startSec.toString())
+            .replace("$" + "{start}", startSec.toString())
+            .replace("{timestamp}", startSec.toString())
+            .replace("$" + "{timestamp}", startSec.toString())
+            .replace("{duration}", durationSec.toString())
+            .replace("$" + "{duration}", durationSec.toString())
+
+        return when {
+            expanded.startsWith("http://") || expanded.startsWith("https://") -> expanded
+            expanded.startsWith("?") -> url.substringBefore("?") + expanded
+            expanded.startsWith("&") -> url + expanded
+            else -> null
+        }
+    }
+}
 
 /**
  * Một kênh, có thể có nhiều nguồn (nguồn chính + dự phòng). url luôn là nguồn đầu tiên.
@@ -18,6 +50,9 @@ data class Channel(
     val sources: List<Source> = listOf(Source(url, ""))
 ) {
     fun hasUrl(u: String?): Boolean = u != null && sources.any { it.url == u }
+
+    fun replayUrl(program: Program): String? =
+        sources.firstNotNullOfOrNull { it.replayUrl(program) }
 }
 
 const val GEO_NOTE = "Chặn vùng"
@@ -25,6 +60,7 @@ const val GEO_NOTE = "Chặn vùng"
 // Siêu dữ liệu của MediaItem: toàn bộ nguồn của kênh + vị trí nguồn đang phát (dùng để tự chuyển nguồn khi lỗi)
 const val EXTRA_SOURCES = "tvdrvu_sources"
 const val EXTRA_INDEX = "tvdrvu_index"
+const val EXTRA_IS_REPLAY = "tvdrvu_is_replay"
 
 /** Chuẩn hóa tên để so khớp: bỏ chú thích, dấu tiếng Việt, ký tự lạ và hậu tố HD/SD. */
 fun normalizeName(raw: String): String {
@@ -76,7 +112,12 @@ fun parseM3u(text: String, category: String): List<Channel> {
             QUALITY.find(name)?.groupValues?.get(1),
             if (name.contains("geo", true)) GEO_NOTE else null
         ).joinToString(" · ")
-        result[line] = Channel(id, name, attrs["tvg-logo"].orEmpty(), group, line, category, listOf(Source(line, note)))
+        val catchupSource = attrs["catchup-source"]?.takeIf { it.isNotBlank() }
+        val catchupDays = (attrs["catchup-days"] ?: attrs["timeshift"]).orEmpty().toIntOrNull() ?: 0
+        result[line] = Channel(
+            id, name, attrs["tvg-logo"].orEmpty(), group, line, category,
+            listOf(Source(line, note, catchupSource, catchupDays))
+        )
     }
     return result.values.toList()
 }

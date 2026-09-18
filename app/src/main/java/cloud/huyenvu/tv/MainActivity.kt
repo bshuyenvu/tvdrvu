@@ -345,6 +345,20 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
         p.prepare(); p.play()
     }
 
+    fun playReplay(program: Program) {
+        val p = playerRef ?: return
+        val channel = selected ?: return
+        val replayUrl = channel.replayUrl(program) ?: run {
+            showMessage("Nguồn này không hỗ trợ phát lại chương trình.")
+            return
+        }
+        p.setMediaItem(channel.toReplayMediaItem(replayUrl, program))
+        p.prepare()
+        p.play()
+        showSchedule = false
+        showMessage("Đang phát lại: " + program.title)
+    }
+
     LaunchedEffect(selected == null) { if (selected == null && fullscreen) exitImmersive() }
 
     // Một cơ chế xoay duy nhất: bấm nút toàn màn hình -> khóa ngang; thoát -> ép dọc cho tới khi
@@ -524,7 +538,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
         }
     }
     if (showSchedule && selected != null) {
-        ScheduleDialog(selected!!, schedule, scheduleState, nowMs) { showSchedule = false }
+        ScheduleDialog(selected!!, schedule, scheduleState, nowMs, onReplay = ::playReplay) { showSchedule = false }
     }
     if (showSources) {
         SourcesDialog(
@@ -776,6 +790,7 @@ private fun VideoPlayer(
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     val target = player
+    val scope = rememberCoroutineScope()
     val fullscreenClick by rememberUpdatedState(onFullscreenClick)
     var hudKind by remember { mutableIntStateOf(-1) }
     var hudPercent by remember { mutableIntStateOf(0) }
@@ -795,12 +810,18 @@ private fun VideoPlayer(
     DisposableEffect(target) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                // Lỗi "behind live window" do dịch vụ phát tự phục hồi, không báo lỗi cho người xem
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) return
-                // Còn nguồn dự phòng: dịch vụ phát đang tự chuyển nguồn, chưa báo lỗi
-                if (target?.hasBackupSource() == true) return
-                buffering = false
-                playbackError = ERROR_TEXT
+                buffering = true
+                playbackError = null
+                val failedId = target?.currentMediaItem?.mediaId
+                scope.launch {
+                    delay(18_000L)
+                    val p = target ?: return@launch
+                    if (p.currentMediaItem?.mediaId == failedId && p.playerError != null) {
+                        buffering = false
+                        playbackError = ERROR_TEXT
+                    }
+                }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
@@ -849,7 +870,12 @@ private fun VideoPlayer(
                     Row {
                         TextButton(onClick = {
                             playbackError = null; buffering = true
-                            target?.let { p -> p.prepare(); p.play() }
+                            target?.let { p ->
+                                if (!p.restartFromFirstSource()) {
+                                    p.prepare()
+                                    p.play()
+                                }
+                            }
                         }) { Text("THỬ LẠI", color = Color.White) }
                         if (onNextSource != null) TextButton(onClick = {
                             playbackError = null; buffering = true; onNextSource()
@@ -898,7 +924,33 @@ private fun Player.hasBackupSource(): Boolean {
     return extras.getInt(EXTRA_INDEX, 0) + 1 < total
 }
 
-private const val ERROR_TEXT = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
+/** Thử lại thủ công từ nguồn chính của kênh sau khi mọi nguồn đã lỗi. */
+private fun Player.restartFromFirstSource(): Boolean {
+    val item = currentMediaItem ?: return false
+    val extras = item.mediaMetadata.extras ?: return false
+    val urls = extras.getStringArray(EXTRA_SOURCES) ?: return false
+    val first = urls.firstOrNull() ?: return false
+    val uri = Uri.parse(first)
+    val reset = item.buildUpon()
+        .setMediaId(first)
+        .setUri(uri)
+        .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(uri).build())
+        .setMediaMetadata(
+            item.mediaMetadata.buildUpon()
+                .setExtras(Bundle(extras).apply {
+                    putInt(EXTRA_INDEX, 0)
+                    putBoolean(EXTRA_IS_REPLAY, false)
+                })
+                .build()
+        )
+        .build()
+    setMediaItem(reset)
+    prepare()
+    play()
+    return true
+}
+
+private const val ERROR_TEXT = "Đã thử kết nối lại và các nguồn dự phòng nhưng kênh hiện chưa phát được."
 
 private sealed interface ScheduleRow {
     data class Day(val label: String) : ScheduleRow
@@ -921,7 +973,7 @@ private fun buildScheduleRows(programs: List<Program>): List<ScheduleRow> {
 }
 
 @Composable
-private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: String, nowMs: Long, onDismiss: () -> Unit) {
+private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: String, nowMs: Long, onReplay: (Program) -> Unit, onDismiss: () -> Unit) {
     val rows = remember(programs) { buildScheduleRows(programs) }
     val listState = rememberLazyListState()
     val nowIndex = rows.indexOfFirst { it is ScheduleRow.Item && nowMs >= it.program.start && nowMs < it.program.stop }
@@ -935,8 +987,9 @@ private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: Str
             Column {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Lịch phát sóng", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                        Text("Lịch phát sóng 3 ngày", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                         Text(channel.name, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("Hôm qua • Hôm nay • Ngày mai", color = Muted, fontSize = 11.sp)
                     }
                     IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Đóng") }
                 }
@@ -964,8 +1017,22 @@ private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: Str
                                             fontWeight = FontWeight.Bold, modifier = Modifier.width(56.dp))
                                         Column(Modifier.weight(1f)) {
                                             Text(p.title, fontWeight = if (live) FontWeight.ExtraBold else FontWeight.SemiBold)
-                                            if (live) Text("ĐANG PHÁT · đến ${formatTime(p.stop)}", color = Teal, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            if (live) {
+                                                Text("ĐANG PHÁT · đến ${formatTime(p.stop)}", color = Teal, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            } else if (p.stop <= nowMs) {
+                                                Text("ĐÃ PHÁT", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
                                             if (p.desc.isNotBlank()) Text(p.desc, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                                            if (p.stop <= nowMs && channel.replayUrl(p) != null) {
+                                                TextButton(
+                                                    onClick = { onReplay(p) },
+                                                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Replay, null, modifier = Modifier.size(16.dp))
+                                                    Spacer(Modifier.width(5.dp))
+                                                    Text("PHÁT LẠI", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1031,6 +1098,7 @@ private fun Channel.toMediaItem(index: Int): MediaItem {
     val extras = Bundle().apply {
         putStringArray(EXTRA_SOURCES, sources.map { it.url }.toTypedArray())
         putInt(EXTRA_INDEX, sources.indexOf(src))
+        putBoolean(EXTRA_IS_REPLAY, false)
     }
     return MediaItem.Builder()
         .setMediaId(src.url)
@@ -1042,6 +1110,28 @@ private fun Channel.toMediaItem(index: Int): MediaItem {
                     if (src.note.isNotBlank()) setSubtitle(src.note)
                     if (logo.isNotBlank()) setArtworkUri(Uri.parse(logo))
                 }
+                .build()
+        )
+        .build()
+}
+
+private fun Channel.toReplayMediaItem(url: String, program: Program): MediaItem {
+    val extras = Bundle().apply {
+        putStringArray(EXTRA_SOURCES, arrayOf(url))
+        putInt(EXTRA_INDEX, 0)
+        putBoolean(EXTRA_IS_REPLAY, true)
+    }
+    return MediaItem.Builder()
+        .setMediaId(url)
+        .setUri(url)
+        .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(url)).build())
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(program.title)
+                .setArtist(name)
+                .setSubtitle("Phát lại · " + formatTime(program.start))
+                .setExtras(extras)
+                .apply { if (logo.isNotBlank()) setArtworkUri(Uri.parse(logo)) }
                 .build()
         )
         .build()
