@@ -10,10 +10,11 @@ import android.net.Uri
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
-import android.content.res.Configuration
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Rational
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
@@ -24,6 +25,7 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,8 +41,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -80,6 +82,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 private val PLAYLISTS = listOf(
     "Việt Nam" to "https://iptv-org.github.io/iptv/countries/vn.m3u",
@@ -187,7 +190,6 @@ private fun TVDrVuTheme(content: @Composable () -> Unit) {
 private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpenHandled: () -> Unit) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
-    val configuration = LocalConfiguration.current
     val scope = rememberCoroutineScope()
     var channels by remember { mutableStateOf<List<Channel>>(emptyList()) }
     var selected by remember { mutableStateOf<Channel?>(null) }
@@ -203,7 +205,6 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     var pipAuto by remember { mutableStateOf(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("pip_auto", false)) }
     var sleepMinutes by remember { mutableStateOf<Int?>(null) }
     var sleepKey by remember { mutableIntStateOf(0) }
-    var screenLocked by remember { mutableStateOf(false) }
     val recording by RecorderState.isRecording.collectAsState()
     val recorderMessage by RecorderState.lastMessage.collectAsState()
     val playerRef by rememberUpdatedState(player)
@@ -309,36 +310,6 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
         return
     }
 
-    val phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
-        configuration.screenHeightDp < 600
-    val landscapeChannel = selected
-    if (phoneLandscape && landscapeChannel != null) {
-        DisposableEffect(Unit) {
-            activity?.window?.let { window ->
-                WindowCompat.setDecorFitsSystemWindows(window, false)
-                WindowInsetsControllerCompat(window, window.decorView).apply {
-                    hide(WindowInsetsCompat.Type.systemBars())
-                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                }
-            }
-            onDispose {
-                activity?.window?.let { window ->
-                    WindowCompat.setDecorFitsSystemWindows(window, false)
-                    WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
-                }
-            }
-        }
-        BackHandler {
-            if (!screenLocked) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        }
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            VideoPlayer(
-                player, controls = !screenLocked, landscapeHost = true,
-                locked = screenLocked, onToggleLock = { screenLocked = !screenLocked }
-            )
-        }
-        return
-    }
 
     Surface(Modifier.fillMaxSize(), color = Color.Transparent, contentColor = Color.White) {
     BoxWithConstraints(
@@ -557,30 +528,65 @@ private fun PlayerPane(
 @OptIn(UnstableApi::class)
 @Composable
 private fun VideoPlayer(
-    player: Player?, controls: Boolean = true, landscapeHost: Boolean = false,
-    locked: Boolean = false, onToggleLock: () -> Unit = {}
+    player: Player?, controls: Boolean = true
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     val target = player
-    var isFullscreen by remember { mutableStateOf(false) }
-    var playbackError by remember(target) {
-        mutableStateOf<String?>(if (target?.playerError != null) "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác." else null)
+    val audioManager = remember(context) {
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
-    var buffering by remember(target) { mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING) }
+
+    var isFullscreen by remember { mutableStateOf(false) }
+    var screenLocked by remember { mutableStateOf(false) }
+    var hudKind by remember { mutableStateOf<String?>(null) }
+    var hudPercent by remember { mutableIntStateOf(0) }
+    var hudActive by remember { mutableStateOf(false) }
+
+    fun readBrightness(): Float {
+        val windowValue = activity?.window?.attributes?.screenBrightness ?: -1f
+        if (windowValue >= 0f) return windowValue.coerceIn(0.02f, 1f)
+        return runCatching {
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
+        }.getOrDefault(0.5f).coerceIn(0.02f, 1f)
+    }
+
+    var brightnessLevel by remember(activity) { mutableFloatStateOf(readBrightness()) }
+    var volumeLevel by remember(audioManager) {
+        mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
+    }
+
+    var playbackError by remember(target) {
+        mutableStateOf<String?>(
+            if (target?.playerError != null)
+                "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
+            else null
+        )
+    }
+    var buffering by remember(target) {
+        mutableStateOf(target == null || target.playbackState == Player.STATE_BUFFERING)
+    }
+
+    LaunchedEffect(hudActive) {
+        if (!hudActive && hudKind != null) {
+            delay(650)
+            if (!hudActive) hudKind = null
+        }
+    }
 
     DisposableEffect(target) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                // Lỗi "behind live window" do dịch vụ phát tự phục hồi, không báo lỗi cho người xem
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) return
                 buffering = false
                 playbackError = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
             }
+
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) playbackError = null
             }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 playbackError = null
                 buffering = true
@@ -591,83 +597,248 @@ private fun VideoPlayer(
     }
 
     fun setFullscreen(enabled: Boolean) {
+        if (enabled == isFullscreen) return
         isFullscreen = enabled
-        activity?.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        if (!enabled) screenLocked = false
+
         activity?.window?.let { window ->
+            WindowCompat.setDecorFitsSystemWindows(window, false)
             WindowInsetsControllerCompat(window, window.decorView).apply {
                 if (enabled) {
                     hide(WindowInsetsCompat.Type.systemBars())
-                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                } else show(WindowInsetsCompat.Type.systemBars())
+                    systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                } else {
+                    show(WindowInsetsCompat.Type.systemBars())
+                }
             }
+        }
+
+        activity?.requestedOrientation = if (enabled) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+
+        if (!enabled) {
+            activity?.window?.decorView?.postDelayed({
+                if (!isFullscreen) {
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
+            }, 650L)
         }
     }
 
-    BackHandler(enabled = isFullscreen) { setFullscreen(false) }
+    BackHandler(enabled = isFullscreen) {
+        if (screenLocked) screenLocked = false else setFullscreen(false)
+    }
+
+    @Composable
+    fun GestureZone(brightness: Boolean, modifier: Modifier) {
+        val maxVolume = remember(audioManager) {
+            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        }
+
+        Box(
+            modifier.pointerInput(isFullscreen, screenLocked) {
+                if (!isFullscreen || screenLocked) return@pointerInput
+                detectVerticalDragGestures(
+                    onDragStart = {
+                        hudActive = true
+                        if (brightness) {
+                            brightnessLevel = readBrightness()
+                            hudKind = "Độ sáng"
+                            hudPercent = (brightnessLevel * 100).roundToInt()
+                        } else {
+                            volumeLevel =
+                                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+                            hudKind = "Âm lượng"
+                            hudPercent =
+                                ((volumeLevel / maxVolume.toFloat()) * 100).roundToInt()
+                        }
+                    },
+                    onVerticalDrag = { change, dragAmount ->
+                        change.consume()
+                        val height = size.height.coerceAtLeast(1).toFloat()
+                        val delta = (-dragAmount / height) * 1.35f
+
+                        if (brightness) {
+                            brightnessLevel = (brightnessLevel + delta).coerceIn(0.02f, 1f)
+                            activity?.window?.let { window ->
+                                val attrs = window.attributes
+                                attrs.screenBrightness = brightnessLevel
+                                window.attributes = attrs
+                            }
+                            hudKind = "Độ sáng"
+                            hudPercent = (brightnessLevel * 100).roundToInt()
+                        } else {
+                            volumeLevel =
+                                (volumeLevel + delta * maxVolume).coerceIn(0f, maxVolume.toFloat())
+                            val newVolume = volumeLevel.roundToInt().coerceIn(0, maxVolume)
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
+                            hudKind = "Âm lượng"
+                            hudPercent =
+                                ((volumeLevel / maxVolume.toFloat()) * 100).roundToInt()
+                        }
+                    },
+                    onDragEnd = { hudActive = false },
+                    onDragCancel = { hudActive = false }
+                )
+            }
+        )
+    }
 
     @Composable
     fun PlayerSurface(modifier: Modifier) {
         Box(modifier.background(Color.Black)) {
             AndroidView(
                 factory = {
-                    (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
+                    (LayoutInflater.from(it)
+                        .inflate(R.layout.player_view, null) as PlayerView).apply {
                         this.player = target
-                        useController = controls
-                        if (controls) setFullscreenButtonClickListener { enabled ->
-                            if (landscapeHost && !enabled) {
-                                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                            } else setFullscreen(enabled)
+                        useController = controls && !screenLocked
+                        if (controls) {
+                            setFullscreenButtonClickListener { enabled ->
+                                setFullscreen(enabled)
+                            }
                         }
                     }
                 },
-                update = { it.player = target; it.useController = controls },
-                // Nhiều PlayerView có thể cùng gắn một trình phát: view bị gỡ phải nhả trình phát ra
+                update = {
+                    it.player = target
+                    it.useController = controls && !screenLocked
+                },
                 onRelease = { it.player = null },
                 modifier = Modifier.fillMaxSize()
             )
-            if (buffering) CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.Center).size(42.dp),
-                color = Teal, strokeWidth = 4.dp
-            )
+
+            if (isFullscreen && !screenLocked) {
+                GestureZone(
+                    brightness = true,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.34f)
+                )
+                GestureZone(
+                    brightness = false,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.34f)
+                )
+            }
+
+            if (buffering) {
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center).size(42.dp),
+                    color = Teal,
+                    strokeWidth = 4.dp
+                )
+            }
+
             playbackError?.let {
                 Surface(
-                    color = Color(0xCC7F1D1D), shape = RoundedCornerShape(12.dp),
+                    color = Color(0xCC7F1D1D),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.align(Alignment.Center).padding(18.dp)
                 ) {
-                    Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(
+                        Modifier.padding(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
                         Text(it, fontSize = 13.sp)
                         TextButton(onClick = {
-                            playbackError = null; buffering = true
-                            target?.let { p -> p.prepare(); p.play() }
+                            playbackError = null
+                            buffering = true
+                            target?.let { p ->
+                                p.prepare()
+                                p.play()
+                            }
                         }) {
                             Text("THỬ LẠI", color = Color.White)
                         }
                     }
                 }
             }
-            if (landscapeHost) {
-                if (locked) Box(
-                    Modifier.fillMaxSize().clickable(
-                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                        indication = null
-                    ) {}
-                )
-                FilledIconButton(
-                    onClick = onToggleLock,
-                    modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xAA0F172A))
+
+            if (isFullscreen && hudKind != null) {
+                Surface(
+                    color = Color(0xCC0F172A),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.align(Alignment.Center)
                 ) {
-                    Icon(if (locked) Icons.Default.Lock else Icons.Default.LockOpen,
-                        if (locked) "Mở khóa màn hình" else "Khóa màn hình", tint = Color.White)
+                    Row(
+                        Modifier.padding(horizontal = 22.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            if (hudKind == "Độ sáng") Icons.Default.Brightness6
+                            else Icons.Default.VolumeUp,
+                            null,
+                            tint = Color.White
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "$hudKind  $hudPercent%",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            if (isFullscreen) {
+                if (screenLocked) {
+                    Box(
+                        Modifier.fillMaxSize().clickable(
+                            interactionSource = remember {
+                                androidx.compose.foundation.interaction.MutableInteractionSource()
+                            },
+                            indication = null
+                        ) {}
+                    )
+                }
+
+                if (!screenLocked) {
+                    FilledIconButton(
+                        onClick = { setFullscreen(false) },
+                        modifier = Modifier.align(Alignment.TopStart).padding(18.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = Color(0xAA0F172A)
+                        )
+                    ) {
+                        Icon(Icons.Default.FullscreenExit, "Thu nhỏ", tint = Color.White)
+                    }
+                }
+
+                FilledIconButton(
+                    onClick = { screenLocked = !screenLocked },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(18.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = Color(0xAA0F172A)
+                    )
+                ) {
+                    Icon(
+                        if (screenLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                        if (screenLocked) "Mở khóa màn hình" else "Khóa màn hình",
+                        tint = Color.White
+                    )
                 }
             }
         }
     }
 
     if (isFullscreen) {
-        Dialog(onDismissRequest = { setFullscreen(false) },
-            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Dialog(
+            onDismissRequest = {
+                if (!screenLocked) setFullscreen(false)
+            },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
             PlayerSurface(Modifier.fillMaxSize())
         }
     } else {
@@ -678,7 +849,10 @@ private fun VideoPlayer(
         onDispose {
             if (isFullscreen) {
                 activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                activity?.window?.let { WindowInsetsControllerCompat(it, it.decorView).show(WindowInsetsCompat.Type.systemBars()) }
+                activity?.window?.let {
+                    WindowInsetsControllerCompat(it, it.decorView)
+                        .show(WindowInsetsCompat.Type.systemBars())
+                }
             }
         }
     }
