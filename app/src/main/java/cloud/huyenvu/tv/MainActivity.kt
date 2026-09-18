@@ -258,7 +258,7 @@ private fun ChannelPane(
                 trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { onQuery("") }) { Icon(Icons.Default.Close, "Xóa") } },
                 shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth().padding(14.dp)
             )
-            PrimaryTabRow(selectedTabIndex = tab.ordinal, containerColor = Color.Transparent, contentColor = Teal) {
+            TabRow(selectedTabIndex = tab.ordinal, containerColor = Color.Transparent, contentColor = Teal) {
                 ChannelTab.entries.forEach { item ->
                     Tab(selected = tab == item, onClick = { onTab(item) },
                         text = { Text(when (item) { ChannelTab.ALL -> "Tất cả"; ChannelTab.FAVORITES -> "Yêu thích"; ChannelTab.RECENT -> "Gần đây" }, fontSize = 12.sp) })
