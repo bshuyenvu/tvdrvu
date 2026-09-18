@@ -2,9 +2,12 @@ package cloud.huyenvu.tv
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
+import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.annotation.OptIn
@@ -32,10 +35,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -234,13 +242,80 @@ private fun PlayerPane(
 @Composable
 private fun VideoPlayer(url: String) {
     val context = LocalContext.current
+    val activity = context as? ComponentActivity
+    var isFullscreen by remember { mutableStateOf(false) }
+    var playbackError by remember { mutableStateOf<String?>(null) }
     val player = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
+        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+        ExoPlayer.Builder(context, renderers).build().apply {
             setMediaItem(MediaItem.fromUri(url)); prepare(); playWhenReady = true
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
-    AndroidView(factory = { PlayerView(it).apply { this.player = player; useController = true } }, modifier = Modifier.fillMaxSize())
+    DisposableEffect(player) {
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                playbackError = "Không giải mã được hình ảnh của kênh này."
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener); player.release() }
+    }
+
+    fun setFullscreen(enabled: Boolean) {
+        isFullscreen = enabled
+        activity?.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.window?.let { window ->
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                if (enabled) {
+                    hide(WindowInsetsCompat.Type.systemBars())
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                } else show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    BackHandler(enabled = isFullscreen) { setFullscreen(false) }
+
+    @Composable
+    fun PlayerSurface(modifier: Modifier) {
+        Box(modifier.background(Color.Black)) {
+            AndroidView(
+                factory = {
+                    (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
+                        this.player = player
+                        setFullscreenButtonClickListener { setFullscreen(it) }
+                    }
+                },
+                update = { it.player = player },
+                modifier = Modifier.fillMaxSize()
+            )
+            playbackError?.let {
+                Surface(
+                    color = Color(0xCC7F1D1D), shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(12.dp)
+                ) { Text(it, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontSize = 13.sp) }
+            }
+        }
+    }
+
+    if (isFullscreen) {
+        Dialog(onDismissRequest = { setFullscreen(false) },
+            properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+            PlayerSurface(Modifier.fillMaxSize())
+        }
+    } else {
+        PlayerSurface(Modifier.fillMaxSize())
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (isFullscreen) {
+                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                activity?.window?.let { WindowInsetsControllerCompat(it, it.decorView).show(WindowInsetsCompat.Type.systemBars()) }
+            }
+        }
+    }
 }
 
 @Composable
@@ -324,7 +399,9 @@ private fun parseM3u(text: String): List<Channel> {
         if (!url.startsWith("http")) return@forEachIndexed
         val name = line.substringAfter(",", attr(line, "tvg-name")).trim()
         val id = attr(line, "tvg-id").ifBlank { "$name-$index" }
-        result += Channel(id, name, attr(line, "tvg-logo"), attr(line, "group-title").ifBlank { "Việt Nam" }, url)
+        val rawGroup = attr(line, "group-title")
+        val group = rawGroup.takeUnless { it.isBlank() || it.equals("undefined", true) } ?: "Việt Nam"
+        result += Channel(id, name, attr(line, "tvg-logo"), group, url)
     }
     return result.distinctBy { it.url }
 }
