@@ -57,6 +57,9 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -80,11 +83,18 @@ data class Channel(val id: String, val name: String, val logo: String, val group
 enum class ChannelTab { ALL, FAVORITES, RECENT }
 
 class MainActivity : ComponentActivity() {
+    private var pipMode by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
-        setContent { TVDrVuTheme { TVDrVuApp() } }
+        setContent { TVDrVuTheme { TVDrVuApp(pipMode) } }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode)
+        pipMode = isInPictureInPictureMode
     }
 }
 
@@ -99,7 +109,7 @@ private fun TVDrVuTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun TVDrVuApp() {
+private fun TVDrVuApp(pipMode: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var channels by remember { mutableStateOf<List<Channel>>(emptyList()) }
@@ -154,6 +164,14 @@ private fun TVDrVuApp() {
         saveIds(context, "recent", recent)
     }
 
+    if (pipMode) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            selected?.let { VideoPlayer(it.url, dataSaver, controls = false) }
+        }
+        return
+    }
+
+    Surface(Modifier.fillMaxSize(), color = Color.Transparent, contentColor = Color.White) {
     BoxWithConstraints(
         Modifier.fillMaxSize().background(
             Brush.radialGradient(listOf(Color(0xFF103141), DeepNavy), radius = 1100f)
@@ -209,6 +227,7 @@ private fun TVDrVuApp() {
                 }) { Text("THỬ LẠI") }
             }) { Text(it) }
         }
+    }
     }
 }
 
@@ -331,11 +350,12 @@ private fun PlayerPane(
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPlayer(url: String, dataSaver: Boolean) {
+private fun VideoPlayer(url: String, dataSaver: Boolean, controls: Boolean = true) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     var isFullscreen by remember { mutableStateOf(false) }
     var playbackError by remember { mutableStateOf<String?>(null) }
+    var buffering by remember { mutableStateOf(true) }
     val player = remember(url, dataSaver) {
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val trackSelector = DefaultTrackSelector(context).apply {
@@ -348,7 +368,12 @@ private fun VideoPlayer(url: String, dataSaver: Boolean) {
     DisposableEffect(player) {
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                playbackError = "Không giải mã được hình ảnh của kênh này."
+                buffering = false
+                playbackError = "Kênh tạm thời không phát được. Hãy thử lại hoặc chọn kênh khác."
+            }
+            override fun onPlaybackStateChanged(state: Int) {
+                buffering = state == androidx.media3.common.Player.STATE_BUFFERING
+                if (state == androidx.media3.common.Player.STATE_READY) playbackError = null
             }
         }
         player.addListener(listener)
@@ -378,17 +403,29 @@ private fun VideoPlayer(url: String, dataSaver: Boolean) {
                 factory = {
                     (LayoutInflater.from(it).inflate(R.layout.player_view, null) as PlayerView).apply {
                         this.player = player
-                        setFullscreenButtonClickListener { setFullscreen(it) }
+                        useController = controls
+                        if (controls) setFullscreenButtonClickListener { setFullscreen(it) }
                     }
                 },
-                update = { it.player = player },
+                update = { it.player = player; it.useController = controls },
                 modifier = Modifier.fillMaxSize()
+            )
+            if (buffering) CircularProgressIndicator(
+                modifier = Modifier.align(Alignment.Center).size(42.dp),
+                color = Teal, strokeWidth = 4.dp
             )
             playbackError?.let {
                 Surface(
                     color = Color(0xCC7F1D1D), shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.align(Alignment.TopCenter).padding(12.dp)
-                ) { Text(it, modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp), fontSize = 13.sp) }
+                    modifier = Modifier.align(Alignment.Center).padding(18.dp)
+                ) {
+                    Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(it, fontSize = 13.sp)
+                        TextButton(onClick = { playbackError = null; buffering = true; player.prepare(); player.play() }) {
+                            Text("THỬ LẠI", color = Color.White)
+                        }
+                    }
+                }
             }
         }
     }
@@ -488,15 +525,21 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onClick: () -> Unit)
 
 private suspend fun loadChannels(): List<Channel> = withContext(Dispatchers.IO) {
     val client = OkHttpClient()
-    PLAYLISTS.flatMap { (category, url) ->
-        runCatching {
-            val request = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/2.0").build()
-            client.newCall(request).execute().use { response ->
-                check(response.isSuccessful)
-                parseM3u(response.body?.string().orEmpty(), category)
+    coroutineScope {
+        PLAYLISTS.map { (category, url) ->
+            async {
+                runCatching {
+                    val request = Request.Builder().url(url).header("User-Agent", "TV-Dr-Vu-Android/2.1").build()
+                    client.newCall(request).execute().use { response ->
+                        check(response.isSuccessful)
+                        parseM3u(response.body?.string().orEmpty(), category)
+                    }
+                }.getOrDefault(emptyList())
             }
-        }.getOrDefault(emptyList())
-    }.distinctBy { it.url }
+        }.awaitAll().flatten()
+            .filterNot { it.name.contains("geo-blocked", true) || it.name.contains("[geo", true) }
+            .distinctBy { it.url }
+    }
 }
 
 private fun parseM3u(text: String, category: String): List<Channel> {
