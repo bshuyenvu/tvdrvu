@@ -1,5 +1,11 @@
 # theVũ TV — Android
 
+## Phiên bản 3.4.2
+
+- Tự nhận diện track phụ đề của từng luồng phát.
+- Chỉ hiện nút **CC** với kênh có phụ đề được thiết bị hỗ trợ.
+- Tự ẩn **CC** khi kênh không có phụ đề và kiểm tra lại khi đổi nguồn dự phòng.
+
 ## Cập nhật v3.4.1
 
 - Chuẩn hóa toàn bộ tên ứng dụng thành **theVũ TV**.

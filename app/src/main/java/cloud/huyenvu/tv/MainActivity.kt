@@ -77,6 +77,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
@@ -913,6 +914,9 @@ private fun VideoPlayer(
     var originalSubtitle by remember(target) { mutableStateOf("") }
     var translatedSubtitle by remember(target) { mutableStateOf("") }
     var subtitleStatus by remember(target) { mutableStateOf<String?>(null) }
+    var hasSubtitleTracks by remember(target) {
+        mutableStateOf(target?.currentTracks?.hasUsableSubtitleTrack() == true)
+    }
     var translator by remember { mutableStateOf<Translator?>(null) }
     val languageIdentifier = remember { LanguageIdentification.getClient() }
 
@@ -1008,9 +1012,23 @@ private fun VideoPlayer(
                 channelKey = mediaItem?.mediaId.orEmpty()
                 playbackError = null
                 buffering = true
+                // Nguồn mới chưa dò xong track: ẩn CC để không giữ trạng thái của kênh trước.
+                hasSubtitleTracks = false
+                originalSubtitle = ""
+                translatedSubtitle = ""
+                subtitleStatus = null
+            }
+            override fun onTracksChanged(tracks: Tracks) {
+                hasSubtitleTracks = tracks.hasUsableSubtitleTrack()
+                if (!hasSubtitleTracks) {
+                    originalSubtitle = ""
+                    translatedSubtitle = ""
+                    subtitleStatus = null
+                }
             }
         }
         target?.addListener(listener)
+        hasSubtitleTracks = target?.currentTracks?.hasUsableSubtitleTrack() == true
         onDispose { target?.removeListener(listener) }
     }
 
@@ -1040,7 +1058,7 @@ private fun VideoPlayer(
             update = {
                 it.player = target
                 it.useController = controls && !locked
-                it.subtitleView?.visibility = if (subtitleMode == SubtitleMode.ORIGINAL) View.VISIBLE else View.GONE
+                it.subtitleView?.visibility = if (hasSubtitleTracks && subtitleMode == SubtitleMode.ORIGINAL) View.VISIBLE else View.GONE
                 swipe.enabled = fullscreen && !locked
             },
             // Nhiều PlayerView có thể cùng gắn một trình phát: view bị gỡ phải nhả trình phát ra
@@ -1072,7 +1090,7 @@ private fun VideoPlayer(
                 .background(Color(0xB30F172A), RoundedCornerShape(8.dp))
                 .padding(horizontal = 10.dp, vertical = 6.dp)
         )
-        if (!locked) AssistChip(
+        if (!locked && hasSubtitleTracks) AssistChip(
             onClick = {
                 saveMode(when (subtitleMode) {
                     SubtitleMode.OFF -> SubtitleMode.ORIGINAL
@@ -1149,6 +1167,12 @@ private fun VideoPlayer(
             }
         }
     }
+}
+
+/** Chỉ xem kênh là có CC khi luồng hiện tại chứa track văn bản thiết bị hỗ trợ. */
+private fun Tracks.hasUsableSubtitleTrack(): Boolean = groups.any { group ->
+    group.type == C.TRACK_TYPE_TEXT &&
+        (0 until group.length).any { trackIndex -> group.isTrackSupported(trackIndex) }
 }
 
 /** Còn nguồn dự phòng sau nguồn đang phát (dịch vụ phát đang tự chuyển nguồn). */
