@@ -1,11 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Captions, Clock3, Copy, ExternalLink, Heart, Maximize, Play, Radio, Search, Tv2, WifiOff, X, CalendarDays } from "lucide-react";
+import { Captions, Clock3, Copy, ExternalLink, Heart, Maximize, Play, Radio, Search, Tv2, WifiOff, X, CalendarDays, Circle, Square, PictureInPicture2, Timer, RotateCcw } from "lucide-react";
 
-type Channel = { id: string; name: string; logo: string; group: string; category: string; url: string; sources: string[] };
+type Catchup = { url: string; template: string; days: number };
+type Channel = { id: string; name: string; logo: string; group: string; category: string; url: string; sources: string[]; catchup?: Catchup[] };
 type Program = { startMs: number; stopMs: number; title: string; desc?: string };
 const categories = ["Việt Nam", "Thể thao", "Phim quốc tế", "Giải trí", "Tin tức", "Thiếu nhi"];
+const dayStart = (offset: number) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + offset); return d.getTime(); };
+function replayUrl(channel: Channel, program: Program): string | null {
+  if (program.stopMs >= Date.now()) return null;
+  for (const source of channel.catchup || []) {
+    if (source.days > 0 && Date.now() - program.startMs > source.days * 86400000) continue;
+    const start = Math.floor(program.startMs / 1000);
+    const duration = Math.max(1, Math.floor((program.stopMs - program.startMs) / 1000));
+    const expanded = source.template.replace(/\$?\{(utc|lutc|start|timestamp)\}/g, String(start)).replace(/\$?\{duration\}/g, String(duration));
+    const url = expanded.startsWith("?") ? source.url.split("?")[0] + expanded : expanded.startsWith("&") ? source.url + expanded : expanded;
+    if (/^https?:\/\//i.test(url)) return url;
+  }
+  return null;
+}
 
 declare global {
   interface Document {
@@ -27,13 +41,87 @@ export default function Home() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [replay, setReplay] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [sleepMinutes, setSleepMinutes] = useState(0);
+  const [now, setNow] = useState(Date.now());
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recent, setRecent] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunks = useRef<Blob[]>([]);
+  const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasCaptions, setHasCaptions] = useState(false);
   const [captionsOn, setCaptionsOn] = useState(false);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!sleepMinutes) return;
+    const timer = setTimeout(() => {
+      videoRef.current?.pause();
+      setSleepMinutes(0);
+      setError("Đã dừng phát theo hẹn giờ tắt.");
+    }, sleepMinutes * 60000);
+    return () => clearTimeout(timer);
+  }, [sleepMinutes]);
+
+  const stopRecording = () => {
+    if (stopTimer.current) { clearTimeout(stopTimer.current); stopTimer.current = null; }
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+  };
+
+  const enterPictureInPicture = () => {
+    const video = videoRef.current;
+    if (!video?.requestPictureInPicture) { setError("Trình duyệt này không hỗ trợ cửa sổ nhỏ."); return; }
+    void video.requestPictureInPicture().catch(() => setError("Hãy phát kênh trước khi mở cửa sổ nhỏ."));
+  };
+
+  const startRecording = () => {
+    const video = videoRef.current as (HTMLVideoElement & { captureStream?: () => MediaStream }) | null;
+    if (!video?.captureStream || video.readyState < 2 || video.paused || !window.MediaRecorder) {
+      setError("Hãy phát kênh trên trình duyệt trước khi ghi hình. Trình duyệt này có thể không hỗ trợ ghi.");
+      return;
+    }
+    try {
+      const stream = video.captureStream();
+      if (!stream.getTracks().length) throw new Error("no_tracks");
+      const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"].find(type => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error("unsupported_format");
+      const recorder = new MediaRecorder(stream, { mimeType });
+      const filename = `${(selected?.name || "TV").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 40) || "TV"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${mimeType.includes("mp4") ? "mp4" : "webm"}`;
+      let bytes = 0;
+      recordChunks.current = [];
+      recorder.ondataavailable = event => {
+        if (event.data.size) { recordChunks.current.push(event.data); bytes += event.data.size; }
+        if (bytes >= 250 * 1024 * 1024) stopRecording();
+      };
+      recorder.onstop = () => {
+        const chunks = recordChunks.current;
+        recordChunks.current = [];
+        recorderRef.current = null;
+        setRecording(false);
+        stream.getTracks().forEach(track => track.stop());
+        if (!chunks.length) { setError("Bản ghi trống. Luồng này không hỗ trợ ghi trên trình duyệt."); return; }
+        const href = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
+        const link = document.createElement("a"); link.href = href; link.download = filename; link.click();
+        setTimeout(() => URL.revokeObjectURL(href), 60000);
+      };
+      recorder.onerror = () => { setError("Không thể ghi luồng này trên trình duyệt."); stopRecording(); };
+      recorderRef.current = recorder;
+      recorder.start(1000);
+      setRecording(true); setError("");
+      stopTimer.current = setTimeout(stopRecording, 30 * 60000);
+    } catch { setError("Trình duyệt hoặc nguồn phát này không hỗ trợ ghi hình."); }
+  };
+
+  useEffect(() => { stopRecording(); }, [selected?.url, sourceIndex, replay]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -47,10 +135,11 @@ export default function Home() {
     const verified = () => setHasCaptions(Array.from(video.textTracks).some(track => Array.from(track.cues || []).some(cue => Boolean((cue as VTTCue).text?.trim()))));
     const observeTracks = () => { for (const track of Array.from(video.textTracks)) { if (track.mode === "disabled") track.mode = "hidden"; track.addEventListener("cuechange", verified); } verified(); };
     video.textTracks.addEventListener("addtrack", observeTracks);
-    const url = selected.sources?.[sourceIndex] || selected.url;
+    const url = replay || selected.sources?.[sourceIndex] || selected.url;
     const fail = () => {
       if (cancelled || failed) return;
       failed = true;
+      if (replay) { setError("Không phát lại được chương trình này. Hãy trở về kênh trực tiếp."); return; }
       if (sourceIndex + 1 < (selected.sources?.length || 1)) {
         setError(`Nguồn ${sourceIndex + 1} không phát được. Đang thử nguồn dự phòng…`);
         setSourceIndex(sourceIndex + 1);
@@ -76,18 +165,18 @@ export default function Home() {
     }
     observeTracks();
     return () => { cancelled = true; video.textTracks.removeEventListener("addtrack", observeTracks); video.removeEventListener("error", fail); video.removeEventListener("playing", playing); for (const track of Array.from(video.textTracks)) track.removeEventListener("cuechange", verified); player?.destroy(); video.removeAttribute("src"); video.load(); };
-  }, [selected?.url, selected?.sources, sourceIndex]);
+  }, [selected?.url, selected?.sources, sourceIndex, replay]);
 
   useEffect(() => {
-    if (!selected?.name || !scheduleOpen) return;
+    if (!selected?.name) return;
     const controller = new AbortController();
-    setScheduleError(""); setPrograms([]);
+    setScheduleError(""); setPrograms([]); setScheduleLoading(true);
     fetch(`/api/schedule?name=${encodeURIComponent(selected.name)}`, { signal: controller.signal }).then(async response => {
       if (!response.ok) throw new Error();
       return response.json();
-    }).then(data => { if (!controller.signal.aborted) setPrograms(data.items || []); }).catch(() => { if (!controller.signal.aborted) setScheduleError("Không tải được lịch phát sóng."); });
+    }).then(data => { if (!controller.signal.aborted) { setPrograms(data.items || []); setScheduleLoading(false); } }).catch(() => { if (!controller.signal.aborted) { setScheduleError("Không tải được lịch phát sóng."); setScheduleLoading(false); } });
     return () => controller.abort();
-  }, [selected?.name, scheduleOpen]);
+  }, [selected?.name]);
 
   const remind = (program: Program) => {
     if (!selected) return;
@@ -167,7 +256,9 @@ export default function Home() {
 
   const choose = (channel: Channel) => {
     if (!channel.url) return;
+    stopRecording();
     setSelected(channel);
+    setReplay(null);
     setSourceIndex(0);
     setScheduleOpen(false);
     setError("");
@@ -191,15 +282,17 @@ export default function Home() {
       return matches && inTab;
     }).sort((a, b) => tab === "recent" ? recent.indexOf(a.id) - recent.indexOf(b.id) : a.name.localeCompare(b.name, "vi"));
   }, [channels, favorites, query, recent, tab]);
+  const currentProgram = programs.find(program => program.startMs <= now && program.stopMs > now);
+  const scheduleItems = programs.filter(program => program.stopMs > dayStart(-1) && program.startMs < dayStart(2)).sort((a, b) => a.startMs - b.startMs);
 
   const openVlc = () => {
     if (!selected?.url) return;
-    window.location.href = `vlc://${(selected.sources?.[sourceIndex] || selected.url).replace(/^https?:\/\//, "")}`;
+    window.location.href = `vlc://${(replay || selected.sources?.[sourceIndex] || selected.url).replace(/^https?:\/\//, "")}`;
   };
 
   const copyUrl = async () => {
     if (!selected?.url) return;
-    await navigator.clipboard.writeText(selected.sources?.[sourceIndex] || selected.url);
+    await navigator.clipboard.writeText(replay || selected.sources?.[sourceIndex] || selected.url);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   };
@@ -220,7 +313,7 @@ export default function Home() {
         <section className="min-w-0">
           <div className="player-shell">
             {selected?.url ? (
-              <video ref={videoRef} key={selected.url} className="aspect-video w-full bg-black object-contain" controls playsInline poster={selected.logo || undefined} />
+              <video ref={videoRef} key={selected.url} className="aspect-video w-full bg-black object-contain" controls playsInline poster={selected.logo || undefined} onEnded={() => { if (replay) setReplay(null); }} />
             ) : (
               <div className="grid aspect-video place-items-center bg-black/60">
                 <div className="text-center text-slate-400"><Radio className="mx-auto mb-3" size={42} /><p>Chọn một kênh để bắt đầu</p></div>
@@ -232,7 +325,7 @@ export default function Home() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[.14em] text-cyan-400"><span className="live-dot" /> Đang xem</div>
               <h2 className="mt-1 truncate text-2xl font-bold">{selected?.name || "theVũ TV"}</h2>
-              <p className="mt-1 text-sm text-slate-400">{selected?.group || "Danh sách truyền hình công khai"}</p>
+              <p className="mt-1 text-sm text-slate-400">{replay ? "Đang phát lại" : currentProgram ? `Đang phát: ${currentProgram.title}` : selected?.group || "Danh sách truyền hình công khai"}</p>
             </div>
             <div className="flex gap-2">
               {hasCaptions && <button className={`icon-button ${captionsOn ? "is-active" : ""}`} onClick={toggleCaptions} aria-label={captionsOn ? "Tắt phụ đề" : "Bật phụ đề"} title="Phụ đề CC"><Captions size={20} /></button>}
@@ -243,10 +336,21 @@ export default function Home() {
 
           {selected?.url && <div className="mt-3 flex flex-wrap items-center gap-2">
             <button className="secondary-action px-4" onClick={() => setScheduleOpen(!scheduleOpen)}><CalendarDays size={17} /> Lịch phát sóng</button>
-            {(selected.sources?.length || 0) > 1 && <label className="text-sm text-slate-300">Nguồn phát <select className="source-select" value={sourceIndex} onChange={e => { setSourceIndex(Number(e.target.value)); setError(""); }} aria-label="Chọn nguồn phát">{selected.sources.map((_, index) => <option key={index} value={index}>Nguồn {index + 1}</option>)}</select></label>}
+            {replay && <button className="secondary-action px-4" onClick={() => { setReplay(null); setError(""); }}><RotateCcw size={17} /> Trở về trực tiếp</button>}
+            {(selected.sources?.length || 0) > 1 && !replay && <label className="text-sm text-slate-300">Nguồn phát <select className="source-select" value={sourceIndex} onChange={e => { stopRecording(); setSourceIndex(Number(e.target.value)); setError(""); }} aria-label="Chọn nguồn phát">{selected.sources.map((_, index) => <option key={index} value={index}>Nguồn {index + 1}</option>)}</select></label>}
+            <button className={recording ? "record-action active" : "record-action"} onClick={recording ? stopRecording : startRecording} aria-label={recording ? "Dừng và tải bản ghi" : "Bắt đầu ghi hình"}>{recording ? <Square size={16} fill="currentColor" /> : <Circle size={16} fill="currentColor" />} {recording ? "Dừng và lưu bản ghi" : "Ghi hình"}</button>
+            <button className="secondary-action px-3" onClick={enterPictureInPicture} title="Cửa sổ nhỏ" aria-label="Cửa sổ nhỏ"><PictureInPicture2 size={18} /></button>
+            <label className="text-sm text-slate-300"><Timer size={17} className="inline" /> Hẹn tắt <select className="source-select" value={sleepMinutes} onChange={e => setSleepMinutes(Number(e.target.value))} aria-label="Hẹn giờ tắt"><option value="0">Tắt</option>{[15, 30, 60, 90].map(value => <option key={value} value={value}>{value} phút</option>)}</select></label>
           </div>}
 
-          {scheduleOpen && <div className="schedule-panel"><h3>Lịch phát sóng · {selected?.name}</h3>{scheduleError ? <p>{scheduleError}</p> : programs.length ? <div className="schedule-list">{programs.filter(p => p.stopMs > Date.now() - 86400000 && p.startMs < Date.now() + 2 * 86400000).map((program, i) => <div className="schedule-row" key={`${program.startMs}-${i}`}><time>{new Intl.DateTimeFormat("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(program.startMs)}</time><strong>{program.title}</strong>{program.startMs > Date.now() && <button onClick={() => remind(program)}>Nhắc xem</button>}</div>)}</div> : <p>Chưa có lịch phát sóng cho kênh này.</p>}</div>}
+          {scheduleOpen && <div className="schedule-panel"><h3>Lịch phát sóng 3 ngày · {selected?.name}</h3><p>Hôm qua · Hôm nay · Ngày mai</p>{scheduleLoading ? <p>Đang tải lịch phát sóng…</p> : scheduleError ? <p>{scheduleError}</p> : scheduleItems.length ? <div className="schedule-list">{scheduleItems.map((program, i) => {
+            const date = new Date(program.startMs).toDateString();
+            const heading = i === 0 || new Date(scheduleItems[i - 1].startMs).toDateString() !== date;
+            const live = program.startMs <= now && program.stopMs > now;
+            const past = program.stopMs <= now;
+            const url = selected ? replayUrl(selected, program) : null;
+            return <div key={`${program.startMs}-${i}`}>{heading && <h4 className="schedule-day">{new Intl.DateTimeFormat("vi-VN", { weekday: "long", day: "2-digit", month: "2-digit" }).format(program.startMs)}</h4>}<div className={`schedule-row ${live ? "is-live" : ""}`}><time>{new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(program.startMs)}</time><div className="schedule-detail"><strong>{program.title}</strong><small>{live ? "ĐANG PHÁT" : past ? "ĐÃ PHÁT" : "SẮP PHÁT"} · đến {new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(program.stopMs)}</small>{program.desc && <small>{program.desc}</small>}</div>{past && url && <button onClick={() => { stopRecording(); setReplay(url); setError(""); setScheduleOpen(false); }}>Phát lại</button>}{program.startMs > now && <button onClick={() => remind(program)}>Nhắc xem</button>}</div></div>;
+          })}</div> : <p>Chưa có lịch phát sóng cho kênh này.</p>}</div>}
 
           {error && <div className="notice"><WifiOff size={18} /><span>{error}</span><button onClick={() => setError("")} aria-label="Đóng"><X size={17} /></button></div>}
 
@@ -254,7 +358,7 @@ export default function Home() {
             <button className="primary-action" onClick={openVlc} disabled={!selected?.url}><ExternalLink size={19} /> Mở bằng VLC</button>
             <button className="secondary-action" onClick={copyUrl} disabled={!selected?.url}><Copy size={18} /> {copied ? "Đã sao chép liên kết" : "Sao chép liên kết"}</button>
           </div>
-          <p className="mt-3 text-xs leading-5 text-slate-500">Một số kênh có thể giới hạn theo khu vực hoặc chỉ phát được trong VLC. theVũ TV không lưu trữ nội dung truyền hình.</p>
+          <p className="mt-3 text-xs leading-5 text-slate-500">Ghi hình sẽ tải tệp về thiết bị khi dừng; giữ trang mở trong lúc ghi (tối đa 30 phút hoặc 250 MB). Một số luồng giới hạn theo khu vực hoặc không cho trình duyệt phát/ghi.</p>
         </section>
 
         <aside className="channel-panel">
