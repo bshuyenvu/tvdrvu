@@ -259,6 +259,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     var screenLocked by remember { mutableStateOf(false) }
     var srcIndex by remember { mutableIntStateOf(0) }
     var srcCount by remember { mutableIntStateOf(0) }
+    var sourceLoading by remember { mutableStateOf(false) }
     var schedule by remember { mutableStateOf<List<Program>>(emptyList()) }
     var scheduleState by remember { mutableStateOf("") }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -383,6 +384,13 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
         p.setMediaItem(channel.toMediaItem((current + 1) % channel.sources.size))
         p.prepare(); p.play()
     }
+    fun selectSource(index: Int) {
+        val p = playerRef ?: return
+        val channel = selected ?: return
+        if (index !in channel.sources.indices || index == srcIndex) return
+        p.setMediaItem(channel.toMediaItem(index))
+        p.prepare(); p.play()
+    }
 
     fun playReplay(program: Program) {
         val p = playerRef ?: return
@@ -446,6 +454,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
             val extras = p.mediaMetadata.extras
             srcIndex = extras?.getInt(EXTRA_INDEX, 0) ?: 0
             srcCount = extras?.getStringArray(EXTRA_SOURCES)?.size ?: 0
+            sourceLoading = p.playbackState == Player.STATE_BUFFERING
         }
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { sync() }
@@ -468,7 +477,7 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
     LaunchedEffect(Unit) { while (true) { delay(30_000L); nowMs = System.currentTimeMillis() } }
     val nowProgram = schedule.firstOrNull { nowMs >= it.start && nowMs < it.stop }
     val nowPlaying = nowProgram?.let { "Đang phát: ${it.title} · ${formatTime(it.start)}–${formatTime(it.stop)}" }
-    val sourceText = if (srcCount > 1) "ĐỔI NGUỒN ${srcIndex + 1}/$srcCount" else null
+    val sourceText = if (selected != null && srcCount > 0) "Nguồn ${srcIndex + 1}/$srcCount" else null
 
     if (immersive) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -524,7 +533,9 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
                                 showMessage("Đã hẹn nhắc sau $minutes phút.")
                             } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
                         } }, Modifier.weight(1.65f),
-                        nowPlaying = nowPlaying, sourceText = sourceText, onNextSource = ::nextSource,
+                        nowPlaying = nowPlaying, sourceText = sourceText, sourceLoading = sourceLoading,
+                        onSelectSource = ::selectSource,
+                        onNextSource = ::nextSource,
                         onSchedule = { showSchedule = true }, onFullscreen = ::toggleFullscreen)
                     ChannelPane(visible, selected, query, category, tab, loading,
                         onQuery = { query = it }, onCategory = { category = it }, onTab = { tab = it }, onChoose = ::choose,
@@ -551,7 +562,9 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
                                     showMessage("Đã hẹn nhắc sau $minutes phút.")
                                 } else pickReminderDateTime(context, channel) { text -> showMessage(text) }
                             } }, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), showVideo = false,
-                            nowPlaying = nowPlaying, sourceText = sourceText, onNextSource = ::nextSource,
+                            nowPlaying = nowPlaying, sourceText = sourceText, sourceLoading = sourceLoading,
+                            onSelectSource = ::selectSource,
+                            onNextSource = ::nextSource,
                             onSchedule = { showSchedule = true }, onFullscreen = ::toggleFullscreen)
                         }
                         item {
@@ -577,7 +590,11 @@ private fun TVDrVuApp(player: Player?, pipMode: Boolean, openUrl: String?, onOpe
         }
     }
     if (showSchedule && selected != null) {
-        ScheduleDialog(selected!!, schedule, scheduleState, nowMs, onReplay = ::playReplay) { showSchedule = false }
+        ScheduleDialog(selected!!, schedule, scheduleState, nowMs, onReplay = ::playReplay,
+            onReminder = { program ->
+                scheduleReminderAt(context, selected!!, program.start, program.title)
+                showMessage("Đã hẹn xem ${program.title} lúc ${formatTime(program.start)}.")
+            }) { showSchedule = false }
     }
     if (showSources) {
         SourcesDialog(
@@ -682,10 +699,14 @@ private fun AppHeader(
             )
             Text("TV • Thể thao • Phim • Tin tức", color = Muted, fontSize = 12.sp)
         }
-        IconButton(onClick = onRecordings) { Icon(Icons.Default.VideoLibrary, "Bản ghi", tint = Teal) }
         Box {
             IconButton(onClick = { menu = true }) { Icon(Icons.Default.Tune, "Tiện ích") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Bản ghi") },
+                    leadingIcon = { Icon(Icons.Default.VideoLibrary, null) },
+                    onClick = { onRecordings(); menu = false }
+                )
                 DropdownMenuItem(
                     text = { Text(if (dataSaver) "Tắt tiết kiệm dữ liệu" else "Bật tiết kiệm dữ liệu") },
                     leadingIcon = { Icon(Icons.Default.DataSaverOn, null) },
@@ -723,9 +744,12 @@ private fun PlayerPane(
     selected: Channel?, recording: Boolean, player: Player?, favorite: Boolean, onFavorite: (String) -> Unit,
     onRecord: () -> Unit, onPip: () -> Unit, onReminder: (Int) -> Unit, modifier: Modifier = Modifier,
     showVideo: Boolean = true, nowPlaying: String? = null, sourceText: String? = null,
+    sourceLoading: Boolean = false, onSelectSource: (Int) -> Unit = {},
     onNextSource: () -> Unit = {}, onSchedule: () -> Unit = {}, onFullscreen: () -> Unit = {}
 ) {
     var reminderMenu by remember { mutableStateOf(false) }
+    var sourceMenu by remember { mutableStateOf(false) }
+    var toolsMenu by remember { mutableStateOf(false) }
     Column(modifier) {
         if (showVideo) Surface(
             modifier = Modifier.fillMaxWidth().aspectRatio(16 / 9f),
@@ -760,13 +784,13 @@ private fun PlayerPane(
                 Icon(if (favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "Yêu thích", tint = if (favorite) Teal else Muted)
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onPip, enabled = selected != null, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.PictureInPictureAlt, null); Spacer(Modifier.width(6.dp)); Text("CỬA SỔ NHỎ", fontSize = 11.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = onSchedule, enabled = selected != null, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.Schedule, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text("LỊCH PHÁT SÓNG", fontSize = 10.sp, maxLines = 1)
             }
             Box(Modifier.weight(1f)) {
                 OutlinedButton(onClick = { reminderMenu = true }, enabled = selected != null, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.NotificationsActive, null); Spacer(Modifier.width(6.dp)); Text("NHẮC XEM", fontSize = 11.sp)
+                    Icon(Icons.Default.NotificationsActive, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text("NHẮC XEM", fontSize = 10.sp, maxLines = 1)
                 }
                 DropdownMenu(expanded = reminderMenu, onDismissRequest = { reminderMenu = false }) {
                     listOf(5, 15, 30, 60).forEach { minutes ->
@@ -782,28 +806,40 @@ private fun PlayerPane(
             }
         }
         Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onSchedule, enabled = selected != null, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.Schedule, null); Spacer(Modifier.width(6.dp)); Text("LỊCH PHÁT SÓNG", fontSize = 11.sp)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (sourceText != null) Box(Modifier.weight(1f)) {
+                OutlinedButton(onClick = { sourceMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.SwapHoriz, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (sourceLoading) "Đang chuyển nguồn…" else sourceText, fontSize = 11.sp, maxLines = 1)
+                }
+                DropdownMenu(expanded = sourceMenu, onDismissRequest = { sourceMenu = false }) {
+                    selected?.sources?.forEachIndexed { index, source ->
+                        DropdownMenuItem(
+                            text = { Text("Nguồn ${index + 1}" + (source.note.takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")) },
+                            onClick = { onSelectSource(index); sourceMenu = false }
+                        )
+                    }
+                    if ((selected?.sources?.size ?: 0) > 1) DropdownMenuItem(
+                        text = { Text("Nguồn kế tiếp") }, onClick = { onNextSource(); sourceMenu = false }
+                    )
+                }
             }
-            if (sourceText != null) OutlinedButton(onClick = onNextSource, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.SwapHoriz, null); Spacer(Modifier.width(6.dp)); Text(sourceText, fontSize = 11.sp)
+            Box(Modifier.weight(1f)) {
+                OutlinedButton(onClick = { toolsMenu = true }, enabled = selected != null, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.MoreHoriz, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("TIỆN ÍCH", fontSize = 11.sp)
+                }
+                DropdownMenu(expanded = toolsMenu, onDismissRequest = { toolsMenu = false }) {
+                    DropdownMenuItem(text = { Text("Cửa sổ nhỏ") }, leadingIcon = { Icon(Icons.Default.PictureInPictureAlt, null) },
+                        onClick = { onPip(); toolsMenu = false })
+                    DropdownMenuItem(text = { Text(if (recording) "Dừng và lưu bản ghi" else "Ghi chương trình") },
+                        leadingIcon = { Icon(if (recording) Icons.Default.StopCircle else Icons.Default.FiberManualRecord, null) },
+                        onClick = { onRecord(); toolsMenu = false })
+                }
             }
         }
-        Spacer(Modifier.height(14.dp))
-        Button(onClick = onRecord, enabled = selected != null, modifier = Modifier.fillMaxWidth().height(54.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (recording) Color(0xFFDC2626) else Teal,
-                contentColor = if (recording) Color.White else Color(0xFF031313)
-            )) {
-            Icon(if (recording) Icons.Default.StopCircle else Icons.Default.FiberManualRecord, null)
-            Spacer(Modifier.width(9.dp))
-            Text(if (recording) "DỪNG VÀ LƯU BẢN GHI" else "GHI CHƯƠNG TRÌNH", fontWeight = FontWeight.ExtraBold)
-        }
-        Text(if (recording) "Đang ghi cả hình và tiếng vào Movies/theVũ TV."
-            else "Bản ghi chỉ dùng cá nhân và phụ thuộc quyền truy cập của từng luồng phát.",
-            color = Color(0xFF64748B), fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
+        if (recording) Text("● Đang ghi · Movies/theVũ TV", color = Color(0xFFEF4444), fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp))
     }
 }
 
@@ -1218,7 +1254,8 @@ private fun buildScheduleRows(programs: List<Program>): List<ScheduleRow> {
 }
 
 @Composable
-private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: String, nowMs: Long, onReplay: (Program) -> Unit, onDismiss: () -> Unit) {
+private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: String, nowMs: Long,
+    onReplay: (Program) -> Unit, onReminder: (Program) -> Unit, onDismiss: () -> Unit) {
     val rows = remember(programs) { buildScheduleRows(programs) }
     val listState = rememberLazyListState()
     val nowIndex = rows.indexOfFirst { it is ScheduleRow.Item && nowMs >= it.program.start && nowMs < it.program.stop }
@@ -1277,6 +1314,14 @@ private fun ScheduleDialog(channel: Channel, programs: List<Program>, state: Str
                                                     Spacer(Modifier.width(5.dp))
                                                     Text("PHÁT LẠI", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                                 }
+                                            }
+                                            if (p.start > nowMs) TextButton(
+                                                onClick = { onReminder(p) },
+                                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp)
+                                            ) {
+                                                Icon(Icons.Default.NotificationsActive, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("NHẮC XEM", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                             }
                                         }
                                     }
@@ -1554,7 +1599,7 @@ private fun scheduleReminder(context: Context, channel: Channel, minutes: Int) {
     scheduleReminderAt(context, channel, System.currentTimeMillis() + minutes * 60_000L)
 }
 
-private fun scheduleReminderAt(context: Context, channel: Channel, triggerAt: Long) {
+private fun scheduleReminderAt(context: Context, channel: Channel, triggerAt: Long, programTitle: String? = null) {
     if (Build.VERSION.SDK_INT >= 33 &&
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
     ) {
@@ -1562,7 +1607,7 @@ private fun scheduleReminderAt(context: Context, channel: Channel, triggerAt: Lo
             ActivityCompat.requestPermissions(it, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1102)
         }
     }
-    Reminders.schedule(context, channel.name, channel.url, triggerAt)
+    Reminders.schedule(context, programTitle?.let { "${channel.name} · $it" } ?: channel.name, channel.url, triggerAt)
 }
 
 private fun pickReminderDateTime(context: Context, channel: Channel, onResult: (String) -> Unit) {

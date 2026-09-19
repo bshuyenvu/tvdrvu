@@ -1,5 +1,11 @@
 # theVũ TV — Android
 
+## Phiên bản 3.5.0
+
+- Sắp xếp lại thao tác xem: lịch phát sóng và nhắc xem nằm sát thông tin kênh, ghi hình và cửa sổ nhỏ trong Tiện ích.
+- Hiển thị nguồn đang phát, trạng thái chuyển nguồn và chọn trực tiếp từng nguồn.
+- Đặt nhắc xem ngay ở từng chương trình sắp phát trong lịch phát sóng.
+
 ## Phiên bản 3.4.3
 
 - Chỉ hiện **CC** sau khi trình phát nhận được cue phụ đề có nội dung thực tế.
