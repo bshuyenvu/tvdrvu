@@ -5,6 +5,7 @@
 - Tự nhận diện track phụ đề của từng luồng phát.
 - Chỉ hiện nút **CC** với kênh có phụ đề được thiết bị hỗ trợ.
 - Tự ẩn **CC** khi kênh không có phụ đề và kiểm tra lại khi đổi nguồn dự phòng.
+- Build chính thức: Debug và Release qua GitHub Actions.
 
 ## Cập nhật v3.4.1
 
