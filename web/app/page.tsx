@@ -87,25 +87,35 @@ export default function Home() {
     void video.requestPictureInPicture().catch(() => setError("Hãy phát kênh trước khi mở cửa sổ nhỏ."));
   };
 
-  const startRecording = () => {
+  const startRecording = async () => {
     const video = videoRef.current as (HTMLVideoElement & { captureStream?: () => MediaStream }) | null;
     if (!video || video.readyState < 2 || video.paused) {
       setRecordMessage("Kênh chưa phát được trên trình duyệt. Hãy phát kênh hoặc thử nguồn khác trước khi ghi hình.");
       return;
     }
-    if (!video.captureStream || !window.MediaRecorder) {
-      setRecordMessage("Trình duyệt này không hỗ trợ ghi luồng video. Hãy thử Chrome hoặc Edge trên máy tính.");
+    if (!window.MediaRecorder) {
+      setRecordMessage("Trình duyệt này không hỗ trợ ghi hình. Hãy thử Chrome hoặc Edge trên máy tính.");
       return;
     }
+    let stream: MediaStream | undefined;
     try {
-      const stream = video.captureStream();
-      if (!stream.getVideoTracks().some(track => track.readyState === "live")) {
-        stream.getTracks().forEach(track => track.stop());
-        setRecordMessage("Nguồn phát không cho phép ghi hình trong trình duyệt. Hãy thử nguồn khác.");
-        return;
+      // Prefer the media element; a tab capture works when captureStream is absent
+      // or the source prohibits direct capture. The chooser requires a user gesture.
+      try { stream = video.captureStream?.(); } catch { /* try tab capture */ }
+      if (!stream?.getVideoTracks().some(track => track.readyState === "live")) {
+        stream?.getTracks().forEach(track => track.stop());
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+          setRecordMessage("Trình duyệt này không hỗ trợ ghi tab. Hãy thử Chrome hoặc Edge trên máy tính.");
+          return;
+        }
+        setRecordMessage("Chọn tab theVũ TV trong cửa sổ chia sẻ và bật ‘Chia sẻ âm thanh của thẻ’ để ghi cả tiếng.");
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true, preferCurrentTab: true } as DisplayMediaStreamOptions);
+        if (!stream.getVideoTracks().some(track => track.readyState === "live")) throw new Error("no_video_track");
       }
+      if (!stream) throw new Error("no_stream");
+      const capture = stream;
       const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"].find(type => MediaRecorder.isTypeSupported(type));
-      if (!mimeType) { stream.getTracks().forEach(track => track.stop()); throw new Error("unsupported_format"); }
+      if (!mimeType) throw new Error("unsupported_format");
       const recorder = new MediaRecorder(stream, { mimeType });
       const filename = `${(selected?.name || "TV").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 40) || "TV"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${mimeType.includes("mp4") ? "mp4" : "webm"}`;
       let bytes = 0;
@@ -119,7 +129,7 @@ export default function Home() {
         recordChunks.current = [];
         recorderRef.current = null;
         setRecording(false);
-        stream.getTracks().forEach(track => track.stop());
+        capture.getTracks().forEach(track => track.stop());
         if (!chunks.length) { setRecordMessage("Bản ghi trống. Nguồn này không hỗ trợ ghi trên trình duyệt."); return; }
         const href = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
         const link = document.createElement("a"); link.href = href; link.download = filename;
@@ -128,11 +138,17 @@ export default function Home() {
         setTimeout(() => URL.revokeObjectURL(href), 60000);
       };
       recorder.onerror = () => { setRecordMessage("Không thể ghi luồng này trên trình duyệt."); stopRecording(); };
+      capture.getVideoTracks().forEach(track => { track.onended = () => { if (recorder.state === "recording") stopRecording(); }; });
       recorderRef.current = recorder;
       recorder.start(1000);
       setRecording(true); setRecordMessage("Đang ghi hình. Giữ trang mở; bấm ‘Dừng và lưu bản ghi’ để tải tệp.");
       stopTimer.current = setTimeout(stopRecording, 30 * 60000);
-    } catch { setRecordMessage("Trình duyệt hoặc nguồn phát này không hỗ trợ ghi hình. Hãy thử nguồn khác hoặc Chrome/Edge trên máy tính."); }
+    } catch (cause) {
+      stream?.getTracks().forEach(track => track.stop());
+      setRecordMessage(cause instanceof DOMException && cause.name === "NotAllowedError"
+        ? "Đã hủy chọn tab. Bấm Ghi hình để thử lại và chọn tab theVũ TV."
+        : "Không ghi được nguồn này. Hãy thử phát lại hoặc dùng Chrome/Edge trên máy tính.");
+    }
   };
 
   useEffect(() => { stopRecording(); }, [selected?.url, sourceIndex, replay]);
