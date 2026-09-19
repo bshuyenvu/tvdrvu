@@ -17,22 +17,6 @@ const starter: Channel[] = [
   { id: "loading-1", name: "Đang tải kênh Việt Nam…", logo: "", group: "Truyền hình", category: "Việt Nam", url: "", sources: [] },
 ];
 
-function parseM3u(text: string): Channel[] {
-  const lines = text.split(/\r?\n/);
-  const result: Channel[] = [];
-  const attr = (line: string, name: string) => line.match(new RegExp(`${name}="([^"]*)"`, "i"))?.[1]?.trim() || "";
-  for (let i = 0; i < lines.length; i++) {
-    const info = lines[i].trim();
-    if (!info.startsWith("#EXTINF")) continue;
-    const url = lines.slice(i + 1).find((line) => line.trim() && !line.trim().startsWith("#"))?.trim() || "";
-    if (!/^https?:\/\//i.test(url)) continue;
-    const name = info.slice(info.indexOf(",") + 1).trim();
-    if (!name) continue;
-    result.push({ id: attr(info, "tvg-id") || `${name}-${result.length}`, name, logo: attr(info, "tvg-logo"), group: attr(info, "group-title") || "Việt Nam", category: "Việt Nam", url, sources: [url] });
-  }
-  return result.filter((channel, index, all) => all.findIndex((item) => item.url === channel.url) === index);
-}
-
 export default function Home() {
   const [channels, setChannels] = useState<Channel[]>(starter);
   const [selected, setSelected] = useState<Channel | null>(null);
@@ -55,6 +39,7 @@ export default function Home() {
     const video = videoRef.current;
     if (!video || !selected?.url) return;
     let cancelled = false;
+    let failed = false;
     let player: import("hls.js").default | undefined;
     setHasCaptions(false);
     setCaptionsOn(false);
@@ -63,32 +48,45 @@ export default function Home() {
     const observeTracks = () => { for (const track of Array.from(video.textTracks)) { if (track.mode === "disabled") track.mode = "hidden"; track.addEventListener("cuechange", verified); } verified(); };
     video.textTracks.addEventListener("addtrack", observeTracks);
     const url = selected.sources?.[sourceIndex] || selected.url;
+    const fail = () => {
+      if (cancelled || failed) return;
+      failed = true;
+      if (sourceIndex + 1 < (selected.sources?.length || 1)) {
+        setError(`Nguồn ${sourceIndex + 1} không phát được. Đang thử nguồn dự phòng…`);
+        setSourceIndex(sourceIndex + 1);
+      } else setError("Các nguồn hiện chưa phát được trên trình duyệt. Hãy thử mở bằng VLC.");
+    };
+    const playing = () => setError("");
+    video.addEventListener("error", fail);
+    video.addEventListener("playing", playing);
     if (/\.m3u8(?:\?|$)/i.test(url) && !video.canPlayType("application/vnd.apple.mpegurl")) {
       import("hls.js").then(({ default: Hls }) => {
         if (cancelled) return;
-        if (!Hls.isSupported()) { setError("Trình duyệt này không hỗ trợ luồng phát. Hãy mở bằng VLC."); return; }
+        if (!Hls.isSupported()) { fail(); return; }
         player = new Hls({ enableWorker: true });
         player.loadSource(url);
         player.attachMedia(video);
         player.on(Hls.Events.MANIFEST_PARSED, () => { if (!cancelled) void video.play().catch(() => {}); });
         player.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, observeTracks);
-        player.on(Hls.Events.ERROR, (_, data) => { if (data.fatal && !cancelled) setError("Không phát được nguồn này. Hãy đổi sang nguồn dự phòng hoặc mở bằng VLC."); });
-      }).catch(() => setError("Không tải được trình phát. Vui lòng thử lại."));
+        player.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(); });
+      }).catch(fail);
     } else {
       video.src = url;
       void video.play().catch(() => {});
     }
     observeTracks();
-    return () => { cancelled = true; video.textTracks.removeEventListener("addtrack", observeTracks); for (const track of Array.from(video.textTracks)) track.removeEventListener("cuechange", verified); player?.destroy(); video.removeAttribute("src"); video.load(); };
+    return () => { cancelled = true; video.textTracks.removeEventListener("addtrack", observeTracks); video.removeEventListener("error", fail); video.removeEventListener("playing", playing); for (const track of Array.from(video.textTracks)) track.removeEventListener("cuechange", verified); player?.destroy(); video.removeAttribute("src"); video.load(); };
   }, [selected?.url, selected?.sources, sourceIndex]);
 
   useEffect(() => {
     if (!selected?.name || !scheduleOpen) return;
+    const controller = new AbortController();
     setScheduleError(""); setPrograms([]);
-    fetch(`/api/schedule?name=${encodeURIComponent(selected.name)}`).then(async response => {
+    fetch(`/api/schedule?name=${encodeURIComponent(selected.name)}`, { signal: controller.signal }).then(async response => {
       if (!response.ok) throw new Error();
       return response.json();
-    }).then(data => setPrograms(data.items || [])).catch(() => setScheduleError("Không tải được lịch phát sóng."));
+    }).then(data => { if (!controller.signal.aborted) setPrograms(data.items || []); }).catch(() => { if (!controller.signal.aborted) setScheduleError("Không tải được lịch phát sóng."); });
+    return () => controller.abort();
   }, [selected?.name, scheduleOpen]);
 
   const remind = (program: Program) => {
@@ -117,16 +115,16 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
     setChannels(starter); setSelected(null);
-    fetch(`/api/channels?category=${encodeURIComponent(category)}`)
+    fetch(`/api/channels?category=${encodeURIComponent(category)}`, { signal: controller.signal })
       .then(async (r) => {
         if (r.ok) return r.json();
-        const fallback = await fetch("https://iptv-org.github.io/iptv/countries/vn.m3u");
-        if (!fallback.ok) throw new Error();
-        return parseM3u(await fallback.text());
+        throw new Error("playlist_unavailable");
       })
-      .then((data) => { const list = Array.isArray(data) ? data as Channel[] : []; setChannels(list); if (list.length) { setSelected(list[0]); setSourceIndex(0); } })
-      .catch(() => { setChannels([]); setError("Chưa tải được danh sách kênh. Vui lòng thử lại sau."); });
+      .then((data) => { const list = Array.isArray(data) ? data as Channel[] : []; if (!controller.signal.aborted) { setChannels(list); if (list.length) { localStorage.setItem(`thevu-tv:channels:${category}`, JSON.stringify(list)); setSelected(list[0]); setSourceIndex(0); setError(""); } } })
+      .catch(() => { if (controller.signal.aborted) return; try { const cached = JSON.parse(localStorage.getItem(`thevu-tv:channels:${category}`) || "[]") as Channel[]; if (cached.length) { setChannels(cached); setSelected(cached[0]); setSourceIndex(0); setError("Đang dùng danh sách kênh đã lưu vì chưa tải được bản cập nhật."); return; } } catch {} setChannels([]); setError("Chưa tải được danh sách kênh. Vui lòng thử lại sau."); });
+    return () => controller.abort();
   }, [category]);
 
   useEffect(() => {
@@ -222,8 +220,7 @@ export default function Home() {
         <section className="min-w-0">
           <div className="player-shell">
             {selected?.url ? (
-              <video ref={videoRef} key={selected.url} className="aspect-video w-full bg-black object-contain" controls playsInline
-                poster={selected.logo || undefined} onError={() => setError("Trình duyệt không phát được luồng này. Hãy chọn “Mở bằng VLC”.")} />
+              <video ref={videoRef} key={selected.url} className="aspect-video w-full bg-black object-contain" controls playsInline poster={selected.logo || undefined} />
             ) : (
               <div className="grid aspect-video place-items-center bg-black/60">
                 <div className="text-center text-slate-400"><Radio className="mx-auto mb-3" size={42} /><p>Chọn một kênh để bắt đầu</p></div>

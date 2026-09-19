@@ -1,6 +1,6 @@
 # theVũ TV — Web
 
-Webapp dựa trên theVũ TV Android v3.5.0. Chạy bằng Next.js trong thư mục `web/`.
+Webapp dựa trên theVũ TV Android v3.5.0. Bản web 3.5.1 tự chuyển nguồn dự phòng khi luồng lỗi, lưu danh sách kênh theo nhóm để xem lại khi mất mạng và cập nhật bộ nhớ đệm PWA ngay sau triển khai. Chạy bằng Next.js trong thư mục `web/`.
 
 ```bash
 npm ci
