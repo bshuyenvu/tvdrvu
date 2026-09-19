@@ -44,6 +44,7 @@ export default function Home() {
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [replay, setReplay] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
+  const [recordMessage, setRecordMessage] = useState("");
   const [sleepMinutes, setSleepMinutes] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [favorites, setFavorites] = useState<string[]>([]);
@@ -73,7 +74,11 @@ export default function Home() {
 
   const stopRecording = () => {
     if (stopTimer.current) { clearTimeout(stopTimer.current); stopTimer.current = null; }
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.requestData();
+      recorderRef.current.stop();
+      setRecordMessage("Đang chuẩn bị tệp ghi hình…");
+    }
   };
 
   const enterPictureInPicture = () => {
@@ -84,15 +89,23 @@ export default function Home() {
 
   const startRecording = () => {
     const video = videoRef.current as (HTMLVideoElement & { captureStream?: () => MediaStream }) | null;
-    if (!video?.captureStream || video.readyState < 2 || video.paused || !window.MediaRecorder) {
-      setError("Hãy phát kênh trên trình duyệt trước khi ghi hình. Trình duyệt này có thể không hỗ trợ ghi.");
+    if (!video || video.readyState < 2 || video.paused) {
+      setRecordMessage("Kênh chưa phát được trên trình duyệt. Hãy phát kênh hoặc thử nguồn khác trước khi ghi hình.");
+      return;
+    }
+    if (!video.captureStream || !window.MediaRecorder) {
+      setRecordMessage("Trình duyệt này không hỗ trợ ghi luồng video. Hãy thử Chrome hoặc Edge trên máy tính.");
       return;
     }
     try {
       const stream = video.captureStream();
-      if (!stream.getTracks().length) throw new Error("no_tracks");
+      if (!stream.getVideoTracks().some(track => track.readyState === "live")) {
+        stream.getTracks().forEach(track => track.stop());
+        setRecordMessage("Nguồn phát không cho phép ghi hình trong trình duyệt. Hãy thử nguồn khác.");
+        return;
+      }
       const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"].find(type => MediaRecorder.isTypeSupported(type));
-      if (!mimeType) throw new Error("unsupported_format");
+      if (!mimeType) { stream.getTracks().forEach(track => track.stop()); throw new Error("unsupported_format"); }
       const recorder = new MediaRecorder(stream, { mimeType });
       const filename = `${(selected?.name || "TV").replace(/[^\p{L}\p{N} _-]/gu, "").trim().slice(0, 40) || "TV"}-${new Date().toISOString().replace(/[:.]/g, "-")}.${mimeType.includes("mp4") ? "mp4" : "webm"}`;
       let bytes = 0;
@@ -107,17 +120,19 @@ export default function Home() {
         recorderRef.current = null;
         setRecording(false);
         stream.getTracks().forEach(track => track.stop());
-        if (!chunks.length) { setError("Bản ghi trống. Luồng này không hỗ trợ ghi trên trình duyệt."); return; }
+        if (!chunks.length) { setRecordMessage("Bản ghi trống. Nguồn này không hỗ trợ ghi trên trình duyệt."); return; }
         const href = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
-        const link = document.createElement("a"); link.href = href; link.download = filename; link.click();
+        const link = document.createElement("a"); link.href = href; link.download = filename;
+        document.body.appendChild(link); link.click(); link.remove();
+        setRecordMessage("Đã tải bản ghi xuống thiết bị.");
         setTimeout(() => URL.revokeObjectURL(href), 60000);
       };
-      recorder.onerror = () => { setError("Không thể ghi luồng này trên trình duyệt."); stopRecording(); };
+      recorder.onerror = () => { setRecordMessage("Không thể ghi luồng này trên trình duyệt."); stopRecording(); };
       recorderRef.current = recorder;
       recorder.start(1000);
-      setRecording(true); setError("");
+      setRecording(true); setRecordMessage("Đang ghi hình. Giữ trang mở; bấm ‘Dừng và lưu bản ghi’ để tải tệp.");
       stopTimer.current = setTimeout(stopRecording, 30 * 60000);
-    } catch { setError("Trình duyệt hoặc nguồn phát này không hỗ trợ ghi hình."); }
+    } catch { setRecordMessage("Trình duyệt hoặc nguồn phát này không hỗ trợ ghi hình. Hãy thử nguồn khác hoặc Chrome/Edge trên máy tính."); }
   };
 
   useEffect(() => { stopRecording(); }, [selected?.url, sourceIndex, replay]);
@@ -256,6 +271,7 @@ export default function Home() {
   const choose = (channel: Channel) => {
     if (!channel.url) return;
     stopRecording();
+    setRecordMessage("");
     setSelected(channel);
     setReplay(null);
     setSourceIndex(0);
@@ -324,11 +340,13 @@ export default function Home() {
           {selected?.url && <div className="mt-3 flex flex-wrap items-center gap-2">
             <button className="secondary-action px-4" onClick={() => setScheduleOpen(!scheduleOpen)}><CalendarDays size={17} /> Lịch phát sóng</button>
             {replay && <button className="secondary-action px-4" onClick={() => { setReplay(null); setError(""); }}><RotateCcw size={17} /> Trở về trực tiếp</button>}
-            {(selected.sources?.length || 0) > 1 && !replay && <label className="text-sm text-slate-300">Nguồn phát <select className="source-select" value={sourceIndex} onChange={e => { stopRecording(); setSourceIndex(Number(e.target.value)); setError(""); }} aria-label="Chọn nguồn phát">{selected.sources.map((_, index) => <option key={index} value={index}>Nguồn {index + 1}</option>)}</select></label>}
+            {(selected.sources?.length || 0) > 1 && !replay && <label className="text-sm text-slate-300">Nguồn phát <select className="source-select" value={sourceIndex} onChange={e => { stopRecording(); setRecordMessage(""); setSourceIndex(Number(e.target.value)); setError(""); }} aria-label="Chọn nguồn phát">{selected.sources.map((_, index) => <option key={index} value={index}>Nguồn {index + 1}</option>)}</select></label>}
             <button className={recording ? "record-action active" : "record-action"} onClick={recording ? stopRecording : startRecording} aria-label={recording ? "Dừng và tải bản ghi" : "Bắt đầu ghi hình"} title="Tải tệp về khi dừng; giữ trang mở trong lúc ghi (tối đa 30 phút hoặc 250 MB)">{recording ? <Square size={16} fill="currentColor" /> : <Circle size={16} fill="currentColor" />} {recording ? "Dừng và lưu bản ghi" : "Ghi hình"}</button>
             <button className="secondary-action px-3" onClick={enterPictureInPicture} title="Cửa sổ nhỏ" aria-label="Cửa sổ nhỏ"><PictureInPicture2 size={18} /></button>
             <label className="text-sm text-slate-300"><Timer size={17} className="inline" /> Hẹn tắt <select className="source-select" value={sleepMinutes} onChange={e => setSleepMinutes(Number(e.target.value))} aria-label="Hẹn giờ tắt"><option value="0">Tắt</option>{[15, 30, 60, 90].map(value => <option key={value} value={value}>{value} phút</option>)}</select></label>
           </div>}
+
+          {recordMessage && <p role="status" aria-live="polite" className="mt-2 text-sm text-amber-200">{recordMessage}</p>}
 
           {scheduleOpen && <div className="schedule-panel"><h3>Lịch phát sóng 3 ngày · {selected?.name}</h3><p>Hôm qua · Hôm nay · Ngày mai</p>{scheduleLoading ? <p>Đang tải lịch phát sóng…</p> : scheduleError ? <p>{scheduleError}</p> : scheduleItems.length ? <div className="schedule-list">{scheduleItems.map((program, i) => {
             const date = new Date(program.startMs).toDateString();

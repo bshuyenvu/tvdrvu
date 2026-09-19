@@ -1,6 +1,6 @@
 # theVũ TV — Web
 
-Webapp dựa trên theVũ TV Android v3.5.0. Bản web 3.6.1 giữ lịch phát sóng ba ngày, đánh dấu chương trình đang chiếu, nhắc xem qua lịch thiết bị, phát lại nếu M3U khai báo nguồn catchup, ghi hình trực tiếp vào tệp tải về, cửa sổ nhỏ, hẹn giờ tắt, tự thử nguồn dự phòng và lưu danh sách kênh theo nhóm. Chạy bằng Next.js trong thư mục `web/`.
+Webapp dựa trên theVũ TV Android v3.5.0. Bản web 3.6.2 giữ lịch phát sóng ba ngày, đánh dấu chương trình đang chiếu, nhắc xem qua lịch thiết bị, phát lại nếu M3U khai báo nguồn catchup, ghi hình trực tiếp vào tệp tải về, cửa sổ nhỏ, hẹn giờ tắt, tự thử nguồn dự phòng và lưu danh sách kênh theo nhóm. Chạy bằng Next.js trong thư mục `web/`.
 
 ```bash
 npm ci
