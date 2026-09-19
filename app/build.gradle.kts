@@ -16,8 +16,8 @@ android {
         // Giữ targetSdk 35 có chủ ý: targetSdk 36 bỏ qua requestedOrientation trên máy tính bảng/màn hình gập,
         // làm hỏng chế độ toàn màn hình xoay ngang.
         targetSdk = 35
-        versionCode = 17
-        versionName = "3.4.2"
+        versionCode = 18
+        versionName = "3.4.3"
         vectorDrawables { useSupportLibrary = true }
     }
 

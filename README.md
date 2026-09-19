@@ -1,5 +1,11 @@
 # theVũ TV — Android
 
+## Phiên bản 3.4.3
+
+- Chỉ hiện **CC** sau khi trình phát nhận được cue phụ đề có nội dung thực tế.
+- Không còn nhận nhầm text track rỗng do HLS khai báo là kênh có phụ đề.
+- Xóa ngay trạng thái xác nhận phụ đề khi đổi kênh hoặc đổi nguồn.
+
 ## Phiên bản 3.4.2
 
 - Tự nhận diện track phụ đề của từng luồng phát.
