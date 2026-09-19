@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Captions, Clock3, Copy, ExternalLink, Heart, Maximize, Play, Radio, Search, Tv2, WifiOff, X, CalendarDays, Circle, Square, PictureInPicture2, Timer, RotateCcw } from "lucide-react";
+import { Captions, Clock3, Heart, Maximize, Play, Radio, Search, Tv2, X, CalendarDays, Circle, Square, PictureInPicture2, Timer, RotateCcw } from "lucide-react";
 
 type Catchup = { url: string; template: string; days: number };
 type Channel = { id: string; name: string; logo: string; group: string; category: string; url: string; sources: string[]; catchup?: Catchup[] };
@@ -49,7 +49,6 @@ export default function Home() {
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recent, setRecent] = useState<string[]>([]);
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunks = useRef<Blob[]>([]);
@@ -143,7 +142,7 @@ export default function Home() {
       if (sourceIndex + 1 < (selected.sources?.length || 1)) {
         setError(`Nguồn ${sourceIndex + 1} không phát được. Đang thử nguồn dự phòng…`);
         setSourceIndex(sourceIndex + 1);
-      } else setError("Các nguồn hiện chưa phát được trên trình duyệt. Hãy thử mở bằng VLC.");
+      } else setError("Các nguồn hiện chưa phát được trên trình duyệt.");
     };
     const playing = () => setError("");
     video.addEventListener("error", fail);
@@ -285,18 +284,6 @@ export default function Home() {
   const currentProgram = programs.find(program => program.startMs <= now && program.stopMs > now);
   const scheduleItems = programs.filter(program => program.stopMs > dayStart(-1) && program.startMs < dayStart(2)).sort((a, b) => a.startMs - b.startMs);
 
-  const openVlc = () => {
-    if (!selected?.url) return;
-    window.location.href = `vlc://${(replay || selected.sources?.[sourceIndex] || selected.url).replace(/^https?:\/\//, "")}`;
-  };
-
-  const copyUrl = async () => {
-    if (!selected?.url) return;
-    await navigator.clipboard.writeText(replay || selected.sources?.[sourceIndex] || selected.url);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  };
-
   return (
     <main className="min-h-screen bg-[#050a12] text-white">
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#07101d]/90 backdrop-blur-xl">
@@ -338,7 +325,7 @@ export default function Home() {
             <button className="secondary-action px-4" onClick={() => setScheduleOpen(!scheduleOpen)}><CalendarDays size={17} /> Lịch phát sóng</button>
             {replay && <button className="secondary-action px-4" onClick={() => { setReplay(null); setError(""); }}><RotateCcw size={17} /> Trở về trực tiếp</button>}
             {(selected.sources?.length || 0) > 1 && !replay && <label className="text-sm text-slate-300">Nguồn phát <select className="source-select" value={sourceIndex} onChange={e => { stopRecording(); setSourceIndex(Number(e.target.value)); setError(""); }} aria-label="Chọn nguồn phát">{selected.sources.map((_, index) => <option key={index} value={index}>Nguồn {index + 1}</option>)}</select></label>}
-            <button className={recording ? "record-action active" : "record-action"} onClick={recording ? stopRecording : startRecording} aria-label={recording ? "Dừng và tải bản ghi" : "Bắt đầu ghi hình"}>{recording ? <Square size={16} fill="currentColor" /> : <Circle size={16} fill="currentColor" />} {recording ? "Dừng và lưu bản ghi" : "Ghi hình"}</button>
+            <button className={recording ? "record-action active" : "record-action"} onClick={recording ? stopRecording : startRecording} aria-label={recording ? "Dừng và tải bản ghi" : "Bắt đầu ghi hình"} title="Tải tệp về khi dừng; giữ trang mở trong lúc ghi (tối đa 30 phút hoặc 250 MB)">{recording ? <Square size={16} fill="currentColor" /> : <Circle size={16} fill="currentColor" />} {recording ? "Dừng và lưu bản ghi" : "Ghi hình"}</button>
             <button className="secondary-action px-3" onClick={enterPictureInPicture} title="Cửa sổ nhỏ" aria-label="Cửa sổ nhỏ"><PictureInPicture2 size={18} /></button>
             <label className="text-sm text-slate-300"><Timer size={17} className="inline" /> Hẹn tắt <select className="source-select" value={sleepMinutes} onChange={e => setSleepMinutes(Number(e.target.value))} aria-label="Hẹn giờ tắt"><option value="0">Tắt</option>{[15, 30, 60, 90].map(value => <option key={value} value={value}>{value} phút</option>)}</select></label>
           </div>}
@@ -352,13 +339,7 @@ export default function Home() {
             return <div key={`${program.startMs}-${i}`}>{heading && <h4 className="schedule-day">{new Intl.DateTimeFormat("vi-VN", { weekday: "long", day: "2-digit", month: "2-digit" }).format(program.startMs)}</h4>}<div className={`schedule-row ${live ? "is-live" : ""}`}><time>{new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(program.startMs)}</time><div className="schedule-detail"><strong>{program.title}</strong><small>{live ? "ĐANG PHÁT" : past ? "ĐÃ PHÁT" : "SẮP PHÁT"} · đến {new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(program.stopMs)}</small>{program.desc && <small>{program.desc}</small>}</div>{past && url && <button onClick={() => { stopRecording(); setReplay(url); setError(""); setScheduleOpen(false); }}>Phát lại</button>}{program.startMs > now && <button onClick={() => remind(program)}>Nhắc xem</button>}</div></div>;
           })}</div> : <p>Chưa có lịch phát sóng cho kênh này.</p>}</div>}
 
-          {error && <div className="notice"><WifiOff size={18} /><span>{error}</span><button onClick={() => setError("")} aria-label="Đóng"><X size={17} /></button></div>}
-
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <button className="primary-action" onClick={openVlc} disabled={!selected?.url}><ExternalLink size={19} /> Mở bằng VLC</button>
-            <button className="secondary-action" onClick={copyUrl} disabled={!selected?.url}><Copy size={18} /> {copied ? "Đã sao chép liên kết" : "Sao chép liên kết"}</button>
-          </div>
-          <p className="mt-3 text-xs leading-5 text-slate-500">Ghi hình sẽ tải tệp về thiết bị khi dừng; giữ trang mở trong lúc ghi (tối đa 30 phút hoặc 250 MB). Một số luồng giới hạn theo khu vực hoặc không cho trình duyệt phát/ghi.</p>
+          <p role="status" className="sr-only" aria-live="polite">{error}</p>
         </section>
 
         <aside className="channel-panel">
