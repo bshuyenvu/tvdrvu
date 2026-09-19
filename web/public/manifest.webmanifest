@@ -1,0 +1,10 @@
+{
+  "name": "theVũ TV",
+  "short_name": "theVũ TV",
+  "description": "Xem các kênh truyền hình công khai trên trình duyệt hoặc VLC.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050a12",
+  "theme_color": "#07101d",
+  "icons": [{"src":"/favicon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}
